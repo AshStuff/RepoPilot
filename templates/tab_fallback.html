@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Tab Navigation Fallback</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+        }
+        h1 {
+            color: #333;
+        }
+        .tab-links {
+            margin: 20px 0;
+            padding: 15px;
+            background-color: #fff;
+            border: 1px solid #eee;
+            border-radius: 5px;
+        }
+        .tab-links a {
+            display: inline-block;
+            margin-right: 10px;
+            padding: 8px 15px;
+            background-color: #007bff;
+            color: white;
+            text-decoration: none;
+            border-radius: 4px;
+        }
+        .tab-links a:hover {
+            background-color: #0056b3;
+        }
+        .help-text {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #fff;
+            border: 1px solid #eee;
+            border-radius: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Tab Navigation Fallback</h1>
+        <p>This page provides direct access to the tab content in case the normal tab navigation is not working.</p>
+        
+        <div class="tab-links">
+            <a href="javascript:void(0)" onclick="showTab('issue')">Issue Tab</a>
+            <a href="javascript:void(0)" onclick="showTab('workspace')">Workspace Tab</a>
+            <a href="javascript:void(0)" onclick="showTab('summary')">Summary Tab</a>
+        </div>
+        
+        <div class="help-text">
+            <h3>Instructions:</h3>
+            <p>Click on one of the buttons above to display the corresponding tab content. These links use a direct approach to show the tab content without relying on the regular tab switching mechanism.</p>
+            <p>If you're seeing this page, it means the tab navigation on the main issue page might be experiencing issues.</p>
+        </div>
+    </div>
+    
+    <script>
+        function showTab(tabId) {
+            // Try to open the tab in the parent window if in an iframe
+            if (window.parent && window.parent !== window) {
+                try {
+                    // Try the direct tab switch function if available
+                    if (window.parent.directTabSwitch) {
+                        window.parent.directTabSwitch(tabId);
+                        return;
+                    }
+                    
+                    // Fallback to direct DOM manipulation
+                    const tabContent = window.parent.document.getElementById(tabId);
+                    if (tabContent) {
+                        // Hide all tabs
+                        const allTabs = window.parent.document.querySelectorAll('.tab-content');
+                        allTabs.forEach(tab => {
+                            tab.style.display = 'none';
+                            tab.classList.remove('active');
+                        });
+                        
+                        // Show the selected tab
+                        tabContent.style.display = 'block';
+                        tabContent.classList.add('active');
+                        
+                        // Update the tab buttons
+                        const tabButtons = window.parent.document.querySelectorAll('.tab-button');
+                        tabButtons.forEach(btn => {
+                            btn.classList.remove('active');
+                            if (btn.getAttribute('data-tab') === tabId) {
+                                btn.classList.add('active');
+                            }
+                        });
+                        
+                        return;
+                    }
+                } catch (e) {
+                    console.error('Error accessing parent window:', e);
+                }
+            }
+            
+            // If we're not in an iframe or couldn't access parent, redirect to the issue page
+            alert('Please return to the issue page and try accessing the ' + tabId + ' tab again.');
+        }
+    </script>
+</body>
+</html> 

@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RepoPilot - Settings</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            min-height: 100vh;
+            overflow-y: auto;
+        }
+        .sidebar {
+            width: 250px;
+            background-color: #1a237e;
+            color: white;
+            padding: 2rem;
+            position: fixed;
+            height: 100vh;
+            overflow-y: auto;
+        }
+        .main-content {
+            margin-left: 250px;
+            min-height: 100vh;
+            background-color: #f9fafb;
+        }
+        .avatar {
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            margin-bottom: 1rem;
+        }
+        .nav-link {
+            color: white;
+            text-decoration: none;
+            padding: 0.8rem;
+            border-radius: 4px;
+            transition: background-color 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 0.8rem;
+            margin-bottom: 0.5rem;
+        }
+        .nav-link:hover,
+        .nav-link.active {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+        .user-profile {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="flex">
+        <!-- Sidebar -->
+        <div class="sidebar">
+            <div class="user-profile">
+                <img src="{{ user.avatar_url }}" alt="{{ user.name }}" class="avatar">
+                <h3 class="text-lg font-semibold">{{ user.name or user.login }}</h3>
+                <p class="text-sm opacity-75">@{{ user.login }}</p>
+            </div>
+            <nav class="flex flex-col">
+                <a href="{{ url_for('dashboard') }}" class="nav-link">
+                    <i class="fas fa-book"></i> Repositories
+                </a>
+                <a href="{{ url_for('settings') }}" class="nav-link active">
+                    <i class="fas fa-cog"></i> Settings
+                </a>
+                <a href="{{ url_for('logout') }}" class="nav-link" onclick="event.preventDefault(); document.getElementById('logout-form').submit();">
+                    <i class="fas fa-sign-out-alt"></i> Logout
+                </a>
+                <form id="logout-form" action="{{ url_for('logout') }}" method="GET" style="display: none;"></form>
+            </nav>
+        </div>
+
+        <!-- Main Content -->
+        <main class="main-content w-full">
+            <div class="max-w-4xl mx-auto py-8 px-4">
+                <!-- Settings Navigation -->
+                <div class="border-b border-gray-200 mb-6">
+                    <nav class="-mb-px flex space-x-8">
+                        <a href="#" class="border-b-2 border-blue-500 py-4 px-1 text-sm font-medium text-blue-600">
+                            Developer Settings
+                        </a>
+                    </nav>
+                </div>
+
+                <!-- Personal Access Tokens Section -->
+                <div class="bg-white rounded-lg shadow">
+                    <div class="p-6 border-b border-gray-200">
+                        <div class="flex justify-between items-center">
+                            <div>
+                                <h2 class="text-xl font-semibold text-gray-900">Personal Access Tokens</h2>
+                                <p class="mt-1 text-sm text-gray-500">
+                                    Tokens you have generated that can be used to access the RepoPilot API.
+                                </p>
+                            </div>
+                            <button onclick="showCreateTokenModal()" 
+                                    class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                <svg class="h-5 w-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+                                </svg>
+                                Generate New Token
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Token List -->
+                    <div class="divide-y divide-gray-200" id="tokenList">
+                        {% if user.token %}
+                            <div class="p-6 flex items-center justify-between" id="token-{{ user.token.id }}">
+                                <div class="flex-1 min-w-0">
+                                    <div class="flex items-center">
+                                        <h3 class="text-lg font-medium text-gray-900">{{ user.token.name }}</h3>
+                                        {% if user.token.last_used %}
+                                        <span class="ml-2 px-2 py-1 text-xs font-medium rounded-full bg-green-100 text-green-800">Active</span>
+                                        {% endif %}
+                                    </div>
+                                    <div class="mt-1 flex flex-col sm:flex-row sm:flex-wrap sm:mt-0 sm:space-x-6">
+                                        <div class="mt-2 flex items-center text-sm text-gray-500">
+                                            <svg class="flex-shrink-0 mr-1.5 h-5 w-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor">
+                                                <path fill-rule="evenodd" d="M6 2a1 1 0 00-1 1v1H4a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-1V3a1 1 0 10-2 0v1H7V3a1 1 0 00-1-1zm0 5a1 1 0 000 2h8a1 1 0 100-2H6z" clip-rule="evenodd"/>
+                                            </svg>
+                                            Created {{ user.token.created_at }}
+                                        </div>
+                                        {% if user.token.last_used %}
+                                        <div class="mt-2 flex items-center text-sm text-gray-500">
+                                            <svg class="flex-shrink-0 mr-1.5 h-5 w-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor">
+                                                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-12a1 1 0 10-2 0v4a1 1 0 00.293.707l2.828 2.829a1 1 0 101.415-1.415L11 9.586V6z" clip-rule="evenodd"/>
+                                            </svg>
+                                            Last used {{ user.token.last_used }}
+                                        </div>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                                <div class="ml-4 flex-shrink-0">
+                                    <button onclick="revokeToken('{{ user.token.token_id }}')" 
+                                            class="font-medium text-red-600 hover:text-red-500 focus:outline-none">
+                                        Delete
+                                    </button>
+                                </div>
+                            </div>
+                        {% else %}
+                            <div class="p-6 text-center text-gray-500">
+                                <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+                                </svg>
+                                <h3 class="mt-2 text-sm font-medium text-gray-900">No tokens</h3>
+                                <p class="mt-1 text-sm text-gray-500">Get started by creating a new access token.</p>
+                                <div class="mt-6">
+                                    <button onclick="showCreateTokenModal()" 
+                                            class="inline-flex items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700">
+                                        <svg class="h-5 w-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
+                                        </svg>
+                                        Generate New Token
+                                    </button>
+                                </div>
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Create Token Modal -->
+    <div id="createTokenModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-lg mx-4">
+            <div class="px-6 py-4 border-b border-gray-200">
+                <h3 class="text-lg font-medium text-gray-900">Generate New Token</h3>
+            </div>
+            <div class="p-6">
+                <div class="space-y-6">
+                    <div>
+                        <label for="tokenName" class="block text-sm font-medium text-gray-700">Token Name</label>
+                        <div class="mt-1">
+                            <input type="text" id="tokenName" 
+                                   class="shadow-sm focus:ring-blue-500 focus:border-blue-500 block w-full sm:text-sm border-gray-300 rounded-md"
+                                   placeholder="Enter a name for your token">
+                        </div>
+                        <p class="mt-2 text-sm text-gray-500">
+                            Give your token a descriptive name for future reference.
+                        </p>
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Token Permissions</label>
+                        <div class="mt-2 space-y-2">
+                            <div class="flex items-center">
+                                <input type="checkbox" checked disabled
+                                       class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded">
+                                <label class="ml-2 block text-sm text-gray-900">
+                                    Read repositories
+                                </label>
+                            </div>
+                            <div class="flex items-center">
+                                <input type="checkbox" checked disabled
+                                       class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded">
+                                <label class="ml-2 block text-sm text-gray-900">
+                                    Write repositories
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="px-6 py-4 bg-gray-50 rounded-b-lg flex justify-end space-x-3">
+                <button onclick="hideCreateTokenModal()" 
+                        class="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 rounded-md">
+                    Cancel
+                </button>
+                <button onclick="showTokenConfirmationModal()" 
+                        class="inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                    Generate Token
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Token Confirmation Modal -->
+    <div id="tokenConfirmationModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-lg mx-4">
+            <div class="px-6 py-4 border-b border-gray-200">
+                <h3 class="text-lg font-medium text-gray-900">Confirm Token Generation</h3>
+            </div>
+            <div class="p-6">
+                <div class="rounded-md bg-yellow-50 p-4">
+                    <div class="flex">
+                        <div class="flex-shrink-0">
+                            <svg class="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
+                            </svg>
+                        </div>
+                        <div class="ml-3">
+                            <h3 class="text-sm font-medium text-yellow-800">
+                                Warning: Your existing token will be replaced
+                            </h3>
+                            <div class="mt-2 text-sm text-yellow-700">
+                                <p>
+                                    Generating a new token will invalidate your current token. Make sure to:
+                                </p>
+                                <ul class="list-disc pl-5 mt-2">
+                                    <li>Update any applications or scripts using the old token</li>
+                                    <li>Save the new token immediately as it won't be shown again</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="px-6 py-4 bg-gray-50 rounded-b-lg flex justify-end space-x-3">
+                <button onclick="hideTokenConfirmationModal()" 
+                        class="px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 rounded-md">
+                    Cancel
+                </button>
+                <button onclick="proceedWithTokenGeneration()" 
+                        class="inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500">
+                    Replace Token
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Token Created Modal -->
+    <div id="tokenCreatedModal" class="fixed inset-0 bg-black bg-opacity-50 hidden items-center justify-center">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-lg mx-4">
+            <div class="px-6 py-4 border-b border-gray-200">
+                <h3 class="text-lg font-medium text-gray-900">Token Created Successfully</h3>
+            </div>
+            <div class="p-6">
+                <div class="rounded-md bg-yellow-50 p-4 mb-4">
+                    <div class="flex">
+                        <div class="flex-shrink-0">
+                            <svg class="h-5 w-5 text-yellow-400" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
+                            </svg>
+                        </div>
+                        <div class="ml-3">
+                            <h3 class="text-sm font-medium text-yellow-800">
+                                Make sure to copy your token now. You won't be able to see it again!
+                            </h3>
+                        </div>
+                    </div>
+                </div>
+                <div class="mt-4">
+                    <label class="block text-sm font-medium text-gray-700">Your New Token</label>
+                    <div class="mt-1 flex rounded-md shadow-sm">
+                        <div class="relative flex items-stretch flex-grow">
+                            <input type="text" id="newTokenValue" readonly
+                                   class="block w-full rounded-md border-gray-300 bg-gray-50 focus:border-blue-500 focus:ring-blue-500 sm:text-sm font-mono">
+                        </div>
+                        <button onclick="copyToken()" 
+                                class="-ml-px relative inline-flex items-center space-x-2 px-4 py-2 border border-gray-300 text-sm font-medium rounded-r-md text-gray-700 bg-gray-50 hover:bg-gray-100 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500">
+                            <svg class="h-5 w-5 text-gray-400" viewBox="0 0 20 20" fill="currentColor">
+                                <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z"/>
+                                <path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 3H9a3 3 0 01-3-3z"/>
+                            </svg>
+                            <span>Copy</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div class="px-6 py-4 bg-gray-50 rounded-b-lg flex justify-end">
+                <button onclick="hideTokenCreatedModal()" 
+                        class="inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                    Done
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function showCreateTokenModal() {
+            const modal = document.getElementById('createTokenModal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+        }
+
+        function hideCreateTokenModal() {
+            const modal = document.getElementById('createTokenModal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+            document.getElementById('tokenName').value = '';
+        }
+
+        function showTokenCreatedModal(token) {
+            const modal = document.getElementById('tokenCreatedModal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+            document.getElementById('newTokenValue').value = token;
+        }
+
+        function hideTokenCreatedModal() {
+            const modal = document.getElementById('tokenCreatedModal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+            document.getElementById('newTokenValue').value = '';
+            window.location.reload();
+        }
+
+        function copyToken() {
+            const tokenInput = document.getElementById('newTokenValue');
+            tokenInput.select();
+            document.execCommand('copy');
+            window.getSelection().removeAllRanges();
+            
+            // Show feedback
+            const copyButton = event.currentTarget;
+            const originalText = copyButton.innerHTML;
+            copyButton.innerHTML = '<span class="text-green-600">Copied!</span>';
+            setTimeout(() => {
+                copyButton.innerHTML = originalText;
+            }, 2000);
+        }
+
+        function showTokenConfirmationModal() {
+            const name = document.getElementById('tokenName').value.trim();
+            if (!name) {
+                alert('Please enter a token name');
+                return;
+            }
+            const modal = document.getElementById('tokenConfirmationModal');
+            modal.classList.remove('hidden');
+            modal.classList.add('flex');
+        }
+
+        function hideTokenConfirmationModal() {
+            const modal = document.getElementById('tokenConfirmationModal');
+            modal.classList.add('hidden');
+            modal.classList.remove('flex');
+        }
+
+        async function proceedWithTokenGeneration() {
+            hideTokenConfirmationModal();
+            const name = document.getElementById('tokenName').value.trim();
+            
+            try {
+                const response = await fetch('/api/tokens', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ name })
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    hideCreateTokenModal();
+                    showTokenCreatedModal(data.token);
+                } else {
+                    const error = await response.json();
+                    alert(error.error || 'Failed to create token');
+                }
+            } catch (error) {
+                alert('Failed to create token');
+                console.error(error);
+            }
+        }
+
+        async function createToken() {
+            showTokenConfirmationModal();
+        }
+
+        async function revokeToken(tokenId) {
+            if (!confirm('Are you sure you want to delete this token? This action cannot be undone and any applications or scripts using this token will no longer be able to access the API.')) {
+                return;
+            }
+
+            try {
+                const response = await fetch(`/api/tokens/${tokenId}`, {
+                    method: 'DELETE'
+                });
+                
+                if (response.ok) {
+                    const element = document.getElementById(`token-${tokenId}`);
+                    if (element) {
+                        element.remove();
+                    }
+                    if (document.getElementById('tokenList').children.length === 0) {
+                        window.location.reload(); // Refresh to show empty state
+                    }
+                } else {
+                    const error = await response.json();
+                    alert(error.error || 'Failed to delete token');
+                }
+            } catch (error) {
+                alert('Failed to delete token');
+                console.error(error);
+            }
+        }
+    </script>
+</body>
+</html> 

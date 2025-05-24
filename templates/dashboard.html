@@ -1,0 +1,1171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RepoPilot - Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            height: 100vh;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+
+        .dashboard-container {
+            display: flex;
+            height: 100vh;
+        }
+
+        /* Sidebar styles */
+        .sidebar {
+            width: 250px;
+            min-width: 250px;
+            background-color: #2f3136;
+            border-right: 1px solid #26282c;
+            height: 100vh;
+            color: #dcddde;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* User profile section */
+        .user-profile {
+            padding: 20px;
+            text-align: center;
+            border-bottom: 1px solid #26282c;
+            background-color: #2f3136;
+        }
+
+        .avatar {
+            width: 80px;
+            height: 80px;
+            border-radius: 50%;
+            margin-bottom: 10px;
+            border: 2px solid #dcddde;
+        }
+
+        .user-profile h3 {
+            margin: 10px 0 5px;
+            color: #ffffff;
+        }
+
+        .user-profile p {
+            color: #dcddde;
+            font-size: 0.9em;
+        }
+
+        /* Navigation links */
+        .sidebar-nav {
+            display: flex;
+            flex-direction: column;
+            padding: 10px 0;
+        }
+
+        .nav-link {
+            display: flex;
+            align-items: center;
+            padding: 12px 20px;
+            color: #dcddde;
+            text-decoration: none;
+            transition: all 0.3s ease;
+            border-left: 3px solid transparent;
+        }
+
+        .nav-link i {
+            margin-right: 10px;
+            width: 20px;
+            text-align: center;
+        }
+
+        .nav-link.active {
+            background-color: #393c43;
+            color: #ffffff;
+            border-left-color: #7289da;
+        }
+
+        .nav-link:hover:not(.active) {
+            background-color: #36393f;
+            border-left-color: #dcddde;
+        }
+
+        .nav-link.logout {
+            margin-top: auto;
+            color: #ed4245;
+            border-top: 1px solid #26282c;
+        }
+
+        .nav-link.logout:hover {
+            background-color: #ed4245;
+            color: white;
+        }
+
+        /* Main content */
+        .main-content {
+            flex: 1;
+            background-color: #fff;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .content-wrapper {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            padding-bottom: 80px; /* Extra padding for footer */
+        }
+
+        /* Repository grid */
+        .repositories-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 25px;
+            padding: 25px;
+            background-color: #f0f2f5;
+        }
+
+        .repository-card {
+            border: 1px solid #cfd4da;
+            border-radius: 8px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            height: 200px;
+            background-color: #ffffff;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            position: relative;
+        }
+
+        .repository-card::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            border-radius: 8px;
+            box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.1);
+            pointer-events: none;
+        }
+
+        .repository-card:hover {
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            border-color: #b8bec5;
+        }
+
+        .dashboard-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 0 25px;
+        }
+
+        .dashboard-header h1 {
+            margin: 0;
+            color: #333;
+            font-size: 24px;
+        }
+
+        .dashboard-header .btn-primary {
+            padding: 8px 16px;
+            font-size: 14px;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            background-color: #2ecc71;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .dashboard-header .btn-primary:hover {
+            background-color: #27ae60;
+        }
+
+        .dashboard-header .btn-primary i {
+            font-size: 12px;
+        }
+
+        .add-repo-btn {
+            padding: 8px 16px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .add-repo-btn:hover {
+            background-color: #0056b3;
+        }
+
+        .add-repo-btn i {
+            font-size: 0.9em;
+        }
+
+        .repo-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .repo-header h3 {
+            margin: 0;
+            color: #333;
+            font-size: 1.1em;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .visibility {
+            font-size: 0.8em;
+            padding: 2px 8px;
+            border-radius: 12px;
+            background-color: #e9ecef;
+            color: #666;
+            flex-shrink: 0;
+            margin-left: 10px;
+        }
+
+        .repo-description {
+            color: #666;
+            margin-bottom: 15px;
+            font-size: 0.9em;
+            overflow: hidden;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            height: 40px; /* Fixed height for 2 lines */
+        }
+
+        .repo-stats {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 15px;
+            color: #666;
+            font-size: 0.9em;
+        }
+
+        .repo-stats span {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .repo-footer {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: auto; /* Push to bottom */
+            font-size: 0.9em;
+        }
+
+        .language {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            color: #666;
+        }
+
+        .language-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #666;
+        }
+
+        .view-repo {
+            color: #007bff;
+            text-decoration: none;
+        }
+
+        .view-repo:hover {
+            text-decoration: underline;
+        }
+
+        /* Footer styles */
+        .footer {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background-color: #ffffff;
+            color: #666666;
+            padding: 15px 20px;
+            text-align: center;
+            font-size: 0.9em;
+            border-top: 1px solid #e0e0e0;
+            box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.05);
+        }
+
+        .footer-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .footer-links {
+            display: flex;
+            gap: 20px;
+        }
+
+        .footer a {
+            color: #666666;
+            text-decoration: none;
+            transition: color 0.3s ease;
+        }
+
+        .footer a:hover {
+            color: #333333;
+        }
+
+        .footer-copyright {
+            color: #666666;
+        }
+
+        /* Settings styles */
+        .settings-container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .settings-section {
+            background: #ffffff;
+            border: 1px solid #cfd4da;
+            border-radius: 8px;
+            padding: 25px;
+            margin-bottom: 25px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }
+
+        .settings-section h2 {
+            color: #333;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .settings-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            color: #333;
+            font-weight: 500;
+        }
+
+        .form-group input[type="text"],
+        .form-group input[type="password"] {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #cfd4da;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        .profile-picture-section {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .profile-picture {
+            width: 100px;
+            height: 100px;
+            border-radius: 50%;
+            object-fit: cover;
+            border: 2px solid #e0e0e0;
+        }
+
+        .upload-btn-wrapper {
+            position: relative;
+            overflow: hidden;
+            display: inline-block;
+        }
+
+        .btn {
+            border: none;
+            color: white;
+            background-color: #007bff;
+            padding: 8px 16px;
+            border-radius: 4px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .btn:hover {
+            background-color: #0056b3;
+        }
+
+        .btn-secondary {
+            background-color: #6c757d;
+        }
+
+        .btn-secondary:hover {
+            background-color: #5a6268;
+        }
+
+        .upload-btn-wrapper input[type=file] {
+            font-size: 100px;
+            position: absolute;
+            left: 0;
+            top: 0;
+            opacity: 0;
+            cursor: pointer;
+        }
+
+        .token-display {
+            position: relative;
+            background-color: #f8f9fa;
+            padding: 12px;
+            border-radius: 4px;
+            border: 1px solid #e0e0e0;
+            margin-top: 8px;
+        }
+
+        .token-text {
+            font-family: monospace;
+            margin-right: 80px;
+            word-break: break-all;
+        }
+
+        .token-hidden {
+            display: none;
+        }
+
+        .token-placeholder {
+            font-family: monospace;
+            letter-spacing: 3px;
+        }
+
+        .token-actions {
+            position: absolute;
+            right: 8px;
+            top: 50%;
+            transform: translateY(-50%);
+            display: flex;
+            gap: 8px;
+        }
+
+        .token-btn {
+            background: none;
+            border: none;
+            color: #007bff;
+            cursor: pointer;
+            padding: 4px;
+        }
+
+        .token-btn:hover {
+            color: #0056b3;
+        }
+
+        .btn-save {
+            background-color: #28a745;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-top: 20px;
+        }
+
+        .btn-save:hover {
+            background-color: #218838;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+        }
+
+        .modal-content {
+            background: white;
+            margin: 10% auto;
+            padding: 20px;
+            width: 90%;
+            max-width: 500px;
+            border-radius: 8px;
+            position: relative;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .close-modal {
+            background: none;
+            border: none;
+            font-size: 24px;
+            cursor: pointer;
+        }
+
+        .btn-primary {
+            background-color: #2ecc71;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .btn-secondary {
+            background-color: #95a5a6;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .help-text {
+            font-size: 0.8em;
+            color: #666;
+            margin-top: 4px;
+        }
+
+        .empty-state {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 400px;
+            background-color: #f8f9fa;
+            border-radius: 8px;
+            margin: 20px;
+        }
+
+        .empty-state-content {
+            text-align: center;
+            max-width: 400px;
+            padding: 40px;
+        }
+
+        .empty-icon {
+            font-size: 48px;
+            color: #6c757d;
+            margin-bottom: 20px;
+        }
+
+        .empty-state h2 {
+            margin-bottom: 10px;
+            color: #343a40;
+        }
+
+        .empty-state p {
+            color: #6c757d;
+            margin-bottom: 20px;
+        }
+
+        .btn-primary {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 24px;
+            background-color: #2ecc71;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 16px;
+            text-decoration: none;
+            transition: background-color 0.2s;
+        }
+
+        .btn-primary:hover {
+            background-color: #27ae60;
+        }
+
+        .manage-access {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            color: #666;
+            text-decoration: none;
+            font-size: 0.9em;
+        }
+
+        .manage-access:hover {
+            color: #333;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 1000;
+        }
+
+        .modal-content {
+            background: white;
+            margin: 5% auto;
+            padding: 20px;
+            width: 90%;
+            max-width: 600px;
+            border-radius: 8px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+
+        .search-box {
+            margin-bottom: 20px;
+        }
+
+        .search-box input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+
+        .repository-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .repository-item {
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .repository-item:hover {
+            background-color: #f8f9fa;
+        }
+
+        .repository-info h4 {
+            margin: 0;
+            color: #333;
+        }
+
+        .repository-info p {
+            margin: 5px 0 0;
+            color: #666;
+            font-size: 0.9em;
+        }
+
+        .connect-btn {
+            padding: 6px 12px;
+            background-color: #2ecc71;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .connect-btn:hover {
+            background-color: #27ae60;
+        }
+
+        .connect-btn.connected {
+            background-color: #95a5a6;
+        }
+
+        .disconnect-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            color: #e74c3c;
+            background: none;
+            border: none;
+            padding: 4px 8px;
+            font-size: 0.9em;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            text-decoration: none;
+        }
+
+        .disconnect-btn:hover {
+            opacity: 0.8;
+        }
+
+        .modal-description {
+            color: #666;
+            font-size: 0.9em;
+            margin-top: 8px;
+        }
+
+        .modal-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+            margin-top: 24px;
+        }
+
+        .btn-danger {
+            background-color: #e74c3c;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .btn-danger:hover {
+            background-color: #c0392b;
+        }
+    </style>
+</head>
+<body>
+    <div class="dashboard-container">
+        <div class="sidebar">
+            <div class="user-profile">
+                <img src="{{ user.avatar_url }}" alt="Profile" class="avatar">
+                <h3>{{ user.name or user.login }}</h3>
+                <p>@{{ user.login }}</p>
+            </div>
+            <nav class="sidebar-nav">
+                <a href="#" class="nav-link active" data-tab="repositories">
+                    <i class="fas fa-book"></i>
+                    Repositories
+                </a>
+                <a href="#" class="nav-link" data-tab="settings">
+                    <i class="fas fa-cog"></i>
+                    Settings
+                </a>
+                <a href="#" class="nav-link logout" onclick="event.preventDefault(); document.getElementById('logout-form').submit();">
+                    <i class="fas fa-sign-out-alt"></i>
+                    Logout
+                </a>
+            </nav>
+            <form id="logout-form" action="{{ url_for('logout') }}" method="POST" style="display: none;"></form>
+        </div>
+
+        <main class="main-content">
+            <div class="content-wrapper">
+                <div id="repositories-tab" class="tab-content">
+                    <div class="dashboard-header">
+                        <h1>Connected Repositories</h1>
+                        {% if connected_repositories %}
+                        <button onclick="showConnectRepoModal()" class="btn-primary">
+                            <i class="fas fa-plus"></i>
+                            Add Repository
+                        </button>
+                        {% endif %}
+                    </div>
+
+                    {% if not connected_repositories %}
+                    <div class="empty-state">
+                        <div class="empty-state-content">
+                            <i class="fas fa-code-branch empty-icon"></i>
+                            <h2>Connect Your GitHub Repositories</h2>
+                            <p>Select which repositories you want to connect with RepoPilot.</p>
+                            <button onclick="showConnectRepoModal()" class="btn-primary">
+                                <i class="fab fa-github"></i>
+                                Connect Repositories
+                            </button>
+                        </div>
+                    </div>
+                    {% else %}
+                    <div class="repositories-grid">
+                        {% for repo in connected_repositories %}
+                        <div class="repository-card">
+                            <div class="repo-header">
+                                <h3>
+                                    <a href="{{ url_for('repository_issues', repo_name=repo.name) }}" class="repo-name-link">
+                                        <span class="repo-owner">{{ repo.name.split('/')[0] }}</span>
+                                        /
+                                        <span class="repo-name">{{ repo.name.split('/')[-1] }}</span>
+                                    </a>
+                                </h3>
+                                <span class="visibility">{{ repo.is_private and 'Private' or 'Public' }}</span>
+                            </div>
+                            <p class="repo-description">{{ repo.description or 'No description available' }}</p>
+                            <div class="repo-footer">
+                                <div class="repo-actions">
+                                    <a href="https://github.com/{{ repo.name }}" target="_blank" class="view-repo">
+                                        <i class="fab fa-github"></i>
+                                        View on GitHub
+                                    </a>
+                                </div>
+                                <button onclick="showDisconnectConfirmation('{{ repo.github_repo_id }}', '{{ repo.name }}')" class="disconnect-btn">
+                                    <i class="fas fa-unlink"></i>
+                                    Disconnect
+                                </button>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                </div>
+
+                <!-- Repository Connection Modal -->
+                <div id="connectRepoModal" class="modal">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h3>Connect Repositories</h3>
+                            <button onclick="hideConnectRepoModal()" class="close-modal">&times;</button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="search-box">
+                                <input type="text" id="repoSearch" placeholder="Search repositories..." onkeyup="filterRepositories()">
+                            </div>
+                            <div id="repositoryList" class="repository-list">
+                                <!-- Repositories will be loaded here -->
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Disconnect Confirmation Modal -->
+                <div id="disconnectModal" class="modal">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h3>Disconnect Repository</h3>
+                            <button onclick="hideDisconnectModal()" class="close-modal">&times;</button>
+                        </div>
+                        <div class="modal-body">
+                            <p>Are you sure you want to disconnect the repository "<span id="disconnectRepoName"></span>"?</p>
+                            <p class="modal-description">This will remove the repository from RepoPilot. You can always connect it again later.</p>
+                            <div class="modal-actions">
+                                <button onclick="hideDisconnectModal()" class="btn-secondary">Cancel</button>
+                                <button onclick="confirmDisconnect()" class="btn-danger">Disconnect</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="settings-tab" class="tab-content" style="display: none;">
+                    <div class="settings-container">
+                        <div class="settings-section">
+                            <h2>Profile Settings</h2>
+                            <div class="profile-picture-section">
+                                <img src="{{ user.avatar_url }}" alt="Profile Picture" class="profile-picture">
+                                <div class="upload-btn-wrapper">
+                                    <button class="btn">Upload New Picture</button>
+                                    <input type="file" name="profile_picture" accept="image/*" />
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="display_name">Display Name</label>
+                                <input type="text" id="display_name" value="{{ user.name or user.login }}" placeholder="Enter your display name">
+                            </div>
+                            <div class="form-group">
+                                <label for="email">Email</label>
+                                <input type="text" id="email" value="{{ user.email }}" placeholder="Enter your email" readonly>
+                            </div>
+                        </div>
+
+                        <div class="settings-section">
+                            <h2>Access Token</h2>
+                            <p>Your GitHub access token for API access:</p>
+                            <div class="token-display">
+                                <div class="token-text token-hidden">{{ user.access_token if user.access_token else 'No token available' }}</div>
+                                <div class="token-placeholder">••••••••••••••••</div>
+                                <div class="token-actions">
+                                    <button class="token-btn" onclick="toggleToken()" title="Show/Hide Token">
+                                        <i class="fas fa-eye"></i>
+                                    </button>
+                                    <button class="token-btn" onclick="copyToken()" title="Copy Token">
+                                        <i class="fas fa-copy"></i>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <button class="btn-save" onclick="saveSettings()">Save Changes</button>
+                    </div>
+                </div>
+            </div>
+
+            <footer class="footer">
+                <div class="footer-content">
+                    <div class="footer-copyright">
+                        © 2024 RepoPilot. All rights reserved.
+                    </div>
+                    <div class="footer-links">
+                        <a href="#">Privacy Policy</a>
+                        <a href="#">Terms of Service</a>
+                        <a href="#">Contact</a>
+                    </div>
+                </div>
+            </footer>
+        </main>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Tab switching
+            const tabs = document.querySelectorAll('.nav-link[data-tab]');
+            const tabContents = document.querySelectorAll('.tab-content');
+
+            tabs.forEach(tab => {
+                tab.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    
+                    // Remove active class from all tabs
+                    tabs.forEach(t => t.classList.remove('active'));
+                    
+                    // Add active class to clicked tab
+                    tab.classList.add('active');
+                    
+                    // Hide all tab contents
+                    tabContents.forEach(content => {
+                        content.style.display = 'none';
+                    });
+                    
+                    // Show selected tab content
+                    const tabId = tab.getAttribute('data-tab');
+                    document.getElementById(tabId + '-tab').style.display = 'block';
+                });
+            });
+        });
+
+        function toggleToken() {
+            const tokenText = document.querySelector('.token-text');
+            const tokenPlaceholder = document.querySelector('.token-placeholder');
+            const toggleBtn = document.querySelector('.token-btn i');
+            
+            if (tokenText.classList.contains('token-hidden')) {
+                tokenText.classList.remove('token-hidden');
+                tokenPlaceholder.style.display = 'none';
+                toggleBtn.classList.remove('fa-eye');
+                toggleBtn.classList.add('fa-eye-slash');
+            } else {
+                tokenText.classList.add('token-hidden');
+                tokenPlaceholder.style.display = 'block';
+                toggleBtn.classList.remove('fa-eye-slash');
+                toggleBtn.classList.add('fa-eye');
+            }
+        }
+
+        function copyToken() {
+            const tokenText = document.querySelector('.token-text').textContent;
+            navigator.clipboard.writeText(tokenText).then(() => {
+                alert('Token copied to clipboard!');
+            });
+        }
+
+        function saveSettings() {
+            // Handle saving settings
+            alert('Settings saved successfully!');
+        }
+
+        function showConnectRepoModal() {
+            document.getElementById('connectRepoModal').style.display = 'block';
+            loadRepositories();
+        }
+
+        function hideConnectRepoModal() {
+            document.getElementById('connectRepoModal').style.display = 'none';
+            // Reload the page when closing the modal to show updated repositories
+            window.location.reload();
+        }
+
+        function loadRepositories() {
+            // Show loading state
+            const repoList = document.getElementById('repositoryList');
+            repoList.innerHTML = '<p>Loading repositories...</p>';
+
+            // Fetch repositories from GitHub
+            fetch('/api/github/repositories')
+                .then(response => response.json())
+                .then(data => {
+                    repoList.innerHTML = '';
+                    data.forEach(repo => {
+                        const repoElement = document.createElement('div');
+                        repoElement.className = 'repository-item';
+                        repoElement.innerHTML = `
+                            <div class="repository-info">
+                                <h4>${repo.name}</h4>
+                                <p>${repo.description || 'No description available'}</p>
+                            </div>
+                            <button 
+                                onclick="toggleRepository('${repo.id}', '${repo.name}', this)"
+                                class="connect-btn ${repo.is_connected ? 'connected' : ''}"
+                            >
+                                ${repo.is_connected ? 'Connected' : 'Connect'}
+                            </button>
+                        `;
+                        repoList.appendChild(repoElement);
+                    });
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    repoList.innerHTML = '<p>Error loading repositories. Please try again.</p>';
+                });
+        }
+
+        function filterRepositories() {
+            const searchText = document.getElementById('repoSearch').value.toLowerCase();
+            const repos = document.getElementsByClassName('repository-item');
+            
+            Array.from(repos).forEach(repo => {
+                const name = repo.querySelector('h4').textContent.toLowerCase();
+                const description = repo.querySelector('p').textContent.toLowerCase();
+                
+                if (name.includes(searchText) || description.includes(searchText)) {
+                    repo.style.display = '';
+                } else {
+                    repo.style.display = 'none';
+                }
+            });
+        }
+
+        function toggleRepository(repoId, repoName, button) {
+            const isConnecting = !button.classList.contains('connected');
+            const url = isConnecting ? '/connect/repository' : '/disconnect/repository/' + repoId;
+            
+            fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    repo_id: repoId,
+                    name: repoName
+                })
+            })
+            .then(response => {
+                if (!response.ok) throw new Error('Failed to update repository connection');
+                
+                // Just update the button state
+                button.classList.toggle('connected');
+                button.textContent = isConnecting ? 'Connected' : 'Connect';
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Failed to update repository connection. Please try again.');
+            });
+        }
+
+        let disconnectRepoId = null;
+
+        function showDisconnectConfirmation(repoId, repoName) {
+            disconnectRepoId = repoId;
+            document.getElementById('disconnectRepoName').textContent = repoName;
+            document.getElementById('disconnectModal').style.display = 'block';
+        }
+
+        function hideDisconnectModal() {
+            document.getElementById('disconnectModal').style.display = 'none';
+            disconnectRepoId = null;
+        }
+
+        function confirmDisconnect() {
+            if (!disconnectRepoId) return;
+
+            fetch('/disconnect/repository/' + disconnectRepoId, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            })
+            .then(response => {
+                if (!response.ok) throw new Error('Failed to disconnect repository');
+                window.location.reload();
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Failed to disconnect repository. Please try again.');
+            })
+            .finally(() => {
+                hideDisconnectModal();
+            });
+        }
+
+        // Add click outside handler for modals
+        window.addEventListener('click', function(event) {
+            const connectModal = document.getElementById('connectRepoModal');
+            const disconnectModal = document.getElementById('disconnectModal');
+            
+            if (event.target === connectModal) {
+                hideConnectRepoModal();
+            } else if (event.target === disconnectModal) {
+                hideDisconnectModal();
+            }
+        });
+
+        // Add styles for modal backdrop
+        const style = document.createElement('style');
+        style.textContent = `
+            .modal {
+                display: none;
+                position: fixed;
+                top: 0;
+                left: 0;
+                width: 100%;
+                height: 100%;
+                background: rgba(0, 0, 0, 0.5);
+                z-index: 1000;
+            }
+
+            .modal-content {
+                background: white;
+                margin: 5% auto;
+                padding: 20px;
+                width: 90%;
+                max-width: 600px;
+                border-radius: 8px;
+                max-height: 80vh;
+                overflow-y: auto;
+                position: relative;
+            }
+
+            .close-modal {
+                position: absolute;
+                right: 20px;
+                top: 20px;
+                font-size: 24px;
+                cursor: pointer;
+                background: none;
+                border: none;
+                color: #666;
+            }
+
+            .close-modal:hover {
+                color: #333;
+            }
+        `;
+        document.head.appendChild(style);
+    </script>
+</body>
+</html> 

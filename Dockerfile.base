@@ -1,0 +1,53 @@
+FROM ubuntu:20.04
+
+# Avoid prompts during package installation
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Update and install essential packages
+RUN apt-get update && apt-get install -y \
+    git \
+    python3 \
+    python3-pip \
+    python3-venv \
+    curl \
+    wget \
+    build-essential \
+    ca-certificates \
+    openssh-client \
+    gnupg \
+    lsb-release \
+    software-properties-common \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Docker client
+RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+    | tee /etc/apt/sources.list.d/docker.list > /dev/null \
+    && apt-get update \
+    && apt-get install -y docker-ce-cli \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create working directory
+WORKDIR /workspace
+
+# Create a non-root user to run the container
+RUN groupadd -g 1000 repopilot && \
+    useradd -u 1000 -g repopilot -m -s /bin/bash repopilot && \
+    chown -R repopilot:repopilot /workspace
+
+# Set environment variables
+ENV PATH="/home/repopilot/.local/bin:${PATH}"
+ENV PYTHONPATH="/workspace:${PYTHONPATH}"
+ENV PYTHONUNBUFFERED=1
+
+# Switch to non-root user
+USER repopilot
+
+# Install Python dependencies
+RUN pip3 install --upgrade pip && \
+    pip3 install setuptools wheel
+
+# Default command
+CMD ["/bin/bash"] 

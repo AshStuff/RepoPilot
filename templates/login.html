@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RepoPilot - Multi-Platform Repository Management</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <!-- Add Font Awesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Left side - Branding -->
+        <div class="branding-section">
+            <div class="brand-content">
+                <h1>RepoPilot</h1>
+                <p>Your universal repository management companion</p>
+                <div class="platform-icons">
+                    <i class="fab fa-github"></i>
+                    <i class="fab fa-gitlab"></i>
+                    <i class="fab fa-bitbucket"></i>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right side - Login -->
+        <div class="login-section">
+            <div class="login-container">
+                <!-- Flash messages -->
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                    {% if messages %}
+                        <div class="flash-messages">
+                            {% for category, message in messages %}
+                                <div class="flash-message {{ category }}">
+                                    {{ message }}
+                                </div>
+                            {% endfor %}
+                        </div>
+                    {% endif %}
+                {% endwith %}
+                
+                <h2>Welcome to RepoPilot</h2>
+                <p class="login-subtitle">Choose your platform to continue</p>
+                
+                <div class="social-login">
+                    <a href="{{ url_for('github_login') }}" class="login-button github">
+                        <i class="fab fa-github"></i>
+                        Sign in with GitHub
+                    </a>
+                    <button class="login-button gitlab">
+                        <i class="fab fa-gitlab"></i>
+                        Sign in with GitLab
+                    </button>
+                    <button class="login-button bitbucket">
+                        <i class="fab fa-bitbucket"></i>
+                        Sign in with Bitbucket
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html> 
