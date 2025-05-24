@@ -52,7 +52,7 @@ def cleanup_running_tasks():
         _ACTIVE_ANIMATIONS[animation_id]['running'] = False
     
     # Wait a moment for animations to stop
-    time.sleep(0.2)
+    time.sleep(0.2 )
     
     # Cancel any running asyncio tasks
     for task in _RUNNING_TASKS:
