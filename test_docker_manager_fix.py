@@ -16,8 +16,8 @@ async def test_docker_manager():
     issue_number = 9999
     branch = "main"  # Or specify a tag/branch to test with
     
-    # Create the DockerManager instance
-    manager = DockerManager(simulation_mode=True)  # Use simulation mode for safety
+    # Create a DockerManager instance
+    manager = DockerManager()
     
     try:
         # Create a container with the specified branch
@@ -38,7 +38,7 @@ async def test_docker_manager():
         logger.info(f"Container configuration: {container}")
         
         # Clean up (this is important for non-simulation mode)
-        if not manager.simulation_mode:
+        # if not manager.simulation_mode: # No longer needed
             logger.info(f"Deleting container {container['container_id']}")
             manager.delete_container(container['container_id'])
         

@@ -75,6 +75,28 @@ class IssueAnalyzer:
         # self._register_tools() call removed.
         self._background_tasks = {}  # Store background analysis tasks
 
+    async def _get_branch_name_from_issue_body(self, issue_body: str) -> Optional[str]:
+        """Extracts branch or tag name from the issue body using regex."""
+        branch_to_clone = None
+        try:
+            # Prioritize version/tag over branch if both are somehow present
+            version_tag_regex_match = re.search(r'(?:version|tag):\s*(\S+)', issue_body, re.IGNORECASE)
+            if version_tag_regex_match:
+                branch_to_clone = version_tag_regex_match.group(1).strip()
+            else:
+                branch_regex_match = re.search(r'branch:\s*(\S+)', issue_body, re.IGNORECASE)
+                if branch_regex_match:
+                    branch_to_clone = branch_regex_match.group(1).strip()
+            
+            if branch_to_clone:
+                self.logger.info(f"Extracted branch/tag from issue body: {branch_to_clone}")
+            else:
+                self.logger.info("No specific branch/tag found in issue body.")
+        except Exception as e_parse:
+            self.logger.error(f"Error parsing branch/tag from issue body: {e_parse}")
+            # Return None, caller will handle default
+        return branch_to_clone
+
     # _register_tools method and all its agent.register_tool calls removed (previously lines approx 130-222)
 
     # _analyze_issue_content method removed (previously lines approx 224-235)
@@ -285,217 +307,241 @@ class IssueAnalyzer:
                     loop.close()
 
     async def _analyze_in_background(self, analysis_id: str, issue_body: str, repository: ConnectedRepository, issue_number: int, issue_id_gh: str, access_token: Optional[str] = None, requirements_content: Optional[str] = None):
-        # Renamed issue_id to issue_id_gh to avoid conflict with analysis_id
-        current_thread = threading.current_thread()
-        self._background_tasks[analysis_id] = current_thread
-        animation_id = None
-        build_context_id_for_paths = None # To store build_context_id for path construction
-        cloned_repo_path_for_cleanup = None # To store cloned_repo_path for cleanup
+        analysis = None
+        image_tag_for_cleanup = None
+        build_context_id_for_cleanup = None
+        analysis_reloaded = False # Flag to track if analysis object was reloaded
 
         try:
+            # Ensure analysis object is fetched fresh within the thread/async task
             analysis = IssueAnalysis.objects(id=analysis_id).first()
             if not analysis:
-                self.logger.error(f"Analysis object with ID {analysis_id} not found.")
-                self._log_workspace_message(f"Error: Analysis object not found for issue #{issue_number}.", "error", analysis_id=analysis_id)
+                self.logger.error(f"Analysis ID {analysis_id} not found in _analyze_in_background.")
                 return
             
-            analysis.analysis_status = "in_progress"
-            analysis.add_log("Starting background analysis...", "info")
-            analysis.save()
-            self.logger.info(f"[{analysis_id}] Saved initial status as 'in_progress'.")
+            analysis.analysis_status = 'in_progress'
+            analysis.started_at = datetime.utcnow()
+            analysis.add_log(f"Analysis started in background.", "info")
+            analysis_reloaded = True
 
-            self._log_workspace_message(f"Starting background analysis for issue #{issue_number} ({analysis_id})...", "loading", analysis_id=analysis_id)
-            animation_id = self._start_loading_animation(f"Analyzing issue #{issue_number}...")
+            self.logger.info(f"Starting analysis for issue #{issue_number} in {repository.name}")
 
-            # Determine branch/tag (simple regex for now, as LLM is in container)
-            branch_to_clone = 'main'
-            try:
-                print(f"Issue body: {issue_body}")
-                branch_regex_match = re.search(r'branch:\s*(\S+)', issue_body, re.IGNORECASE)
-                print(f"Branch regex match: {branch_regex_match}")
-                import pdb; pdb.set_trace()
-                version_tag_regex_match = re.search(r'(?:version|tag):\s*(\S+)', issue_body, re.IGNORECASE)
-                if version_tag_regex_match:
-                    branch_to_clone = version_tag_regex_match.group(1).strip()
-                elif branch_regex_match:
-                    branch_to_clone = branch_regex_match.group(1).strip()
-                analysis.add_log(f"Determined branch/version to clone: {branch_to_clone}", "info")
-            except Exception as e_branch:
-                self.logger.error(f"[{analysis_id}] Error parsing branch/tag: {e_branch}")
-                analysis.add_log(f"Could not determine branch/tag, defaulting to '{branch_to_clone}'.", "warning")
-            analysis.save()
-            
-            self._update_loading_animation(animation_id, f"Preparing Docker environment for issue #{issue_number} (branch: {branch_to_clone})...")
-            self._log_workspace_message(f"Preparing Docker environment for issue #{issue_number} (branch: {branch_to_clone})...", "loading", analysis_id=analysis_id)
+            # Define a log callback that updates the specific analysis object
+            def docker_log_callback(log_line: str, stream_type: str):
+                # Ensure analysis object is fresh for each log to avoid issues with stale objects
+                current_analysis = IssueAnalysis.objects(id=analysis_id).first()
+                if not current_analysis:
+                    # If analysis object is gone, log to general logger
+                    self.logger.warning(f"[BuildLog {analysis_id[:8]} Stream: {stream_type}] {log_line} (Analysis object no longer found)")
+                    return
 
-            # Construct the repository URL from the ConnectedRepository's name attribute
-            repo_url = f"https://github.com/{repository.name}.git"
+                # Determine log type for add_log based on stream_type
+                log_type_for_db = stream_type.lower()
+                if stream_type.lower() not in ["info", "error", "warning", "success", "debug"]:
+                    log_type_for_db = "info" # Default if stream_type is stdout/stderr etc.
+
+                current_analysis.add_log(log_line, log_type_for_db)
+                
+                # Limit logs to prevent excessive growth (e.g., last 200 lines) - add_log does not handle this, so keep it here if needed after save by add_log
+                # This logic might be better placed within add_log or as a separate cleanup if add_log saves frequently.
+                # For now, assuming add_log handles its own save, and log limiting is a separate concern.
+                # max_log_entries = 200 
+                # if len(current_analysis.logs) > max_log_entries:
+                #     current_analysis.logs = current_analysis.logs[-max_log_entries:]
+                
+                # try:
+                #     current_analysis.save() # add_log already saves
+                # except Exception as e_save:
+                #     self.logger.error(f"Error saving analysis log for {analysis_id}: {e_save}")
+
+
+            branch_name = await self._get_branch_name_from_issue_body(issue_body)
+            if not branch_name:
+                branch_name = 'main' # Default branch
+                analysis.add_log(f"Could not determine branch/tag from issue body, defaulting to 'main'.", "warning")
+            else:
+                analysis.add_log(f"Using branch/tag: {branch_name} (from issue body or default)", "info")
+
+            self.logger.info(f"Building Docker image for {repository.name} issue #{issue_number}, branch: {branch_name}.")
+            docker_log_callback(f"Attempting to build image for: {repository.name}, issue #{issue_number}, branch: {branch_name}", "info")
             
-            # The call to self.docker_manager.clone_repo_and_create_image needs app_context if it uses current_app
-            # However, DockerManager is instantiated once, so it should not need app_context per call.
-            # Let's assume the method is designed to be called directly.
-            
-            image_id, build_context_id, build_logs, cloned_repo_path = self.docker_manager.clone_repo_and_create_image(
-                repo_url=repo_url,
+            image_tag, build_context_id, build_logs, _ = self.docker_manager.clone_repo_and_create_image(
+                repo_url=f"https://github.com/{repository.name}.git",
                 repo_name=repository.name,
                 issue_number=issue_number,
-                issue_body=issue_body, # Full issue body for issue.txt
-                branch_name=branch_to_clone
+                issue_body=issue_body, # Pass the full issue body for issue.txt
+                branch_name=branch_name,
+                log_callback=docker_log_callback
             )
-            build_context_id_for_paths = build_context_id
-            cloned_repo_path_for_cleanup = cloned_repo_path
+            image_tag_for_cleanup = image_tag
+            build_context_id_for_cleanup = build_context_id
 
-            # Log build logs from image creation
-            if build_logs:
-                for log_line in build_logs:
-                    analysis.add_log(log_line, "build") # Using "build" as type for Docker build logs
-                analysis.save()
+            if build_logs: # clone_repo_and_create_image now returns build_logs directly
+                # The docker_log_callback should have handled detailed logging.
+                # We can add a summary log here if needed.
+                docker_log_callback(f"Image build process completed. Summary of internal logs: {len(build_logs)} entries.", "info")
 
-            if not image_id:
-                self.logger.error(f"[{analysis_id}] Failed to create image. Details in DockerManager logs.")
-                analysis.analysis_status = "error"
-                analysis.error_message = "Docker image creation failed. Check logs."
-                analysis.add_log("Error: Docker image creation failed.", "error")
+            if not image_tag:
+                self.logger.error(f"Docker image build failed for issue #{issue_number}.")
+                docker_log_callback(f"Docker image build failed for issue #{issue_number}. Check logs for errors.", "error")
+                analysis.analysis_status = 'failed'
+                analysis.error_message = "Docker image build failed. See logs for details."
+                analysis.ended_at = datetime.utcnow()
                 analysis.save()
-                self._end_loading_animation(animation_id, "Image creation failed.", success=False)
-                self._log_workspace_message(f"Error: Docker image creation failed for issue #{issue_number}.", "error", analysis_id=analysis_id)
                 return
 
-            analysis.docker_image_id = image_id # Storing actual image_id
-            analysis.build_context_id = build_context_id # Storing build_context_id
-            analysis.analysis_status = "image_built" 
-            analysis.add_log(f"Docker image {image_id[:12]} built successfully (context: {build_context_id}). LLM agent ran during build. Retrieving output from host.", "success")
-            analysis.save()
-            self.logger.info(f"[{analysis_id}] Docker image built. LLM output pre-computed. Status: image_built.")
-            self._log_workspace_message(f"Docker image built. Retrieving pre-computed LLM analysis for issue #{issue_number} from host...", "loading", analysis_id=analysis_id)
-            self._update_loading_animation(animation_id, f"Retrieving LLM analysis from host for issue #{issue_number}...")
-
-            # --- Retrieve analysis output and error log from HOST filesystem ---
-            analysis.analysis_status = 'processing_output'
-            analysis.add_log("Attempting to read analysis files from host...", "info")
-            analysis.save()
-
-            llm_output_content = None
-            llm_error_content = None
-
-            if build_context_id_for_paths:
-                dockerfiles_base_dir = self.docker_manager.dockerfiles_dir
-                output_json_host_path = os.path.join(dockerfiles_base_dir, build_context_id_for_paths, "analysis_output.json")
-                error_log_host_path = os.path.join(dockerfiles_base_dir, build_context_id_for_paths, "analysis_error.log")
-
-                analysis.add_log(f"Looking for output JSON at: {output_json_host_path}", "debug")
-                if os.path.exists(output_json_host_path):
-                    try:
-                        with open(output_json_host_path, 'r', encoding='utf-8') as f:
-                            llm_output_content = f.read()
-                        analysis.add_log("Successfully read analysis_output.json from host.", "info")
-                    except Exception as e_read_out:
-                        analysis.add_log(f"Error reading analysis_output.json from host: {str(e_read_out)}", "error")
-                        self.logger.error(f"[{analysis_id}] Error reading {output_json_host_path}: {e_read_out}")
-                else:
-                    analysis.add_log("analysis_output.json not found on host.", "warning")
-                    self.logger.warning(f"[{analysis_id}] File not found: {output_json_host_path}")
-
-                analysis.add_log(f"Looking for error log at: {error_log_host_path}", "debug")
-                if os.path.exists(error_log_host_path):
-                    try:
-                        with open(error_log_host_path, 'r', encoding='utf-8') as f:
-                            llm_error_content = f.read()
-                        if llm_error_content and llm_error_content.strip():
-                            analysis.add_log("Successfully read analysis_error.log from host. Content preview:", "info")
-                            error_preview = "\\n".join(llm_error_content.splitlines()[:20]) # Show more lines
-                            analysis.add_log(f"--- Error Log Preview ---\\n{error_preview}\\n--- End Error Log Preview ---", "error_log_preview")
-                            self.logger.info(f"[{analysis_id}] Content of {error_log_host_path}:\\n{llm_error_content}")
-                        else:
-                            analysis.add_log("analysis_error.log found on host but is empty.", "info")
-                    except Exception as e_read_err:
-                        analysis.add_log(f"Error reading analysis_error.log from host: {str(e_read_err)}", "error")
-                        self.logger.error(f"[{analysis_id}] Error reading {error_log_host_path}: {e_read_err}")
-                analysis.save()
-            else:
-                analysis.add_log("Build context ID not available, cannot locate analysis files on host.", "error")
-                self.logger.error(f"[{analysis_id}] build_context_id_for_paths is None, cannot form host paths.")
-                analysis.save()
-
-            if llm_output_content:
-                try:
-                    parsed_output = json.loads(llm_output_content)
-                    analysis.issue_summary = parsed_output.get('issue_summary', 'Summary not provided.')
-                    analysis.code_analysis_summary = parsed_output.get('code_analysis_summary', 'Code analysis not provided.')
-                    analysis.proposed_solutions = parsed_output.get('proposed_solutions', [])
-                    analysis.raw_llm_output = llm_output_content
-                    
-                    final_output_parts = [f"Issue Summary: {analysis.issue_summary}"]
-                    if analysis.code_analysis_summary and analysis.code_analysis_summary not in ["Code analysis not provided.", ""]:
-                        final_output_parts.append(f"Code Analysis: {analysis.code_analysis_summary}")
-                    if analysis.proposed_solutions:
-                        solutions_str = "\\n".join([f"- {s}" for s in analysis.proposed_solutions])
-                        final_output_parts.append(f"Proposed Solutions:\\n{solutions_str}")
-                    analysis.final_output = "\\n\\n".join(final_output_parts)
-
-                    if parsed_output.get('error'):
-                        analysis.add_log(f"LLM agent reported an error in its output: {parsed_output.get('error')}", "error")
-                        analysis.analysis_status = 'error'
-                        analysis.error_message = f"LLM agent error: {parsed_output.get('error')}"
-                    else:
-                        analysis.analysis_status = 'completed' # Changed from 'analysis_complete' for consistency
-                    analysis.add_log("Successfully processed LLM analysis output from host.", "success")
-
-                except json.JSONDecodeError as e_json:
-                    analysis.analysis_status = 'error' # Changed from 'llm_output_error'
-                    analysis.error_message = f"Failed to parse LLM output JSON: {str(e_json)}"
-                    analysis.add_log(f"Failed to parse LLM analysis output (JSONDecodeError): {str(e_json)}", "error")
-                    analysis.add_log(f"Raw LLM output (from host) was: \\n{llm_output_content[:1000]}...", "debug") # Log preview
-                    analysis.raw_llm_output = llm_output_content
-                    self.logger.error(f"[{analysis_id}] JSONDecodeError: {e_json}. Raw output preview: {llm_output_content[:500]}")
-                else:
-                    analysis.analysis_status = 'error' # Changed from 'llm_failed'
-                    analysis.error_message = "LLM analysis output file was not found or was empty on host."
-                    analysis.add_log("LLM analysis output file (analysis_output.json) was not found or was empty on host.", "error")
-                    if llm_error_content and llm_error_content.strip():
-                        analysis.add_log("Error log (analysis_error.log) was found on host, indicating a potential script failure during image build. Review error log preview above and full logs.", "warning")
-                    else: # No output and no error log, or error log empty
-                        analysis.add_log("No significant content found in analysis_error.log either. This suggests the agent script might not have run correctly or produced any output/error during image build.", "warning")
+            self.logger.info(f"Docker image {image_tag} built successfully for issue #{issue_number}.")
+            docker_log_callback(f"Docker image {image_tag} built successfully.", "success")
             
-            analysis.updated_at = datetime.utcnow()
-            analysis.save()
-            self_assessment_msg = f"Analysis for issue #{issue_number} finished with status: {analysis.analysis_status}."
-            self._end_loading_animation(animation_id, self_assessment_msg, success=(analysis.analysis_status == "completed"))
-            self._log_workspace_message(self_assessment_msg, "success" if analysis.analysis_status == "completed" else "error", analysis_id=analysis_id)
-                
-        except Exception as e:
-            self.logger.error(f"[{analysis_id}] Unhandled error in _analyze_in_background for issue #{issue_number}: {str(e)}\\n{traceback.format_exc()}")
+            # --- Docker Run ---
+            host_ollama_models_path = os.path.expanduser("~/.ollama/models")
+            # Ensure the path exists, or Docker will create it as root, which might be problematic.
+            # However, for read-only mount of models, it should be fine if it exists.
+            if not os.path.isdir(host_ollama_models_path):
+                docker_log_callback(f"Warning: Host Ollama models path {host_ollama_models_path} does not exist or is not a directory. Ollama in container may not find models.", "warning")
+                # Decide if this is a fatal error or just a warning. For now, warning.
+
+            analysis_results_host_dir = os.path.join(self.docker_manager.dockerfiles_dir, build_context_id, "analysis_results")
+            os.makedirs(analysis_results_host_dir, exist_ok=True)
+            docker_log_callback(f"Host directory for analysis results: {analysis_results_host_dir}", "info")
+
+            container_name = f"repopilot-agent-run-{build_context_id[:8]}"
+
+            run_cmd_args = [
+                "run", 
+                "--name", container_name,
+                "-v", f"{host_ollama_models_path}:/root/.ollama:ro",
+                "-v", f"{analysis_results_host_dir}:/workspace/analysis_results"
+            ]
+            
+            # Add host.docker.internal mapping if OLLAMA_HOST is set to it (it is, in Dockerfile)
+            # This is needed for the container to reach Ollama on the host if host.docker.internal is used.
+            # The Dockerfile sets ENV OLLAMA_HOST=http://host.docker.internal:11434
+            # The --add-host for build was for build-time access, this is for runtime.
+            if sys.platform == "linux" or sys.platform == "linux2":
+                 run_cmd_args.append("--add-host=host.docker.internal:host-gateway")
+            
+            run_cmd_args.append(image_tag)
+            # No command/args appended, as ENTRYPOINT will be used.
+
+            docker_log_callback(f"Executing container {container_name} from image {image_tag} with command: docker {' '.join(run_cmd_args)}", "info")
+            
             try:
-                # Try to update analysis status to error if an object exists
-                analysis_obj = IssueAnalysis.objects(id=analysis_id).first()
-                if analysis_obj: # Check if analysis_obj might have become None due to earlier errors
-                    analysis_obj.analysis_status = "failed" # Universal 'error' changed to 'failed'
-                    analysis_obj.error_message = f"Critical background analysis error: {str(e)}"
-                    analysis_obj.add_log(f"Critical error in analysis background task: {str(e)}", "error")
-                    analysis_obj.save()
-                self._log_workspace_message(f"Critical error during analysis of issue #{issue_number}. Check logs.", "error", analysis_id=analysis_id)
-                if animation_id: # Ensure animation_id exists before trying to end it
-                    self._end_loading_animation(animation_id, "Analysis critically failed.", success=False)
-            except Exception as e_save:
-                self.logger.error(f"[{analysis_id}] Failed to save error status during critical failure: {e_save}")
-        finally:
-            if analysis_id in self._background_tasks:
-                del self._background_tasks[analysis_id]
-            
-            # Cleanup the cloned repository directory using the path returned by docker_manager
-            if cloned_repo_path_for_cleanup and os.path.exists(cloned_repo_path_for_cleanup):
+                process_run_result = self.docker_manager._run_docker_command(
+                    run_cmd_args, 
+                    log_callback=docker_log_callback, 
+                    check=False # check=False to handle non-zero exit codes manually
+                )
+                if process_run_result.returncode != 0:
+                    docker_log_callback(f"Container {container_name} exited with error code {process_run_result.returncode}. Stderr: {process_run_result.stderr}", "error")
+                    analysis.analysis_status = 'failed'
+                    analysis.error_message = f"Agent execution in container failed (exit code {process_run_result.returncode}). Check logs."
+                    # Attempt to get error log content if it exists
+                    error_log_path_host = os.path.join(analysis_results_host_dir, "analysis_error.log")
+                    if os.path.exists(error_log_path_host):
+                        try:
+                            with open(error_log_path_host, 'r') as f_err:
+                                error_details = f_err.read(1000) # Read first 1000 chars
+                                analysis.error_message += f" Agent error log snippet: {error_details}"
+                        except Exception as e_read_err:
+                            docker_log_callback(f"Could not read agent error log: {e_read_err}", "warning")
+                else:
+                    docker_log_callback(f"Container {container_name} completed successfully.", "success")
+            except Exception as e_container_run:
+                self.logger.error(f"Error running Docker container {container_name}: {e_container_run}", exc_info=True)
+                docker_log_callback(f"Failed to run Docker container {container_name}: {e_container_run}", "error")
+                analysis.analysis_status = 'failed'
+                analysis.error_message = f"Failed to run Docker container: {e_container_run}"
+                analysis.ended_at = datetime.utcnow()
+                analysis.save()
+                return # Exit if container run command itself failed catastrophically
+
+            # --- End Docker Run ---
+
+            # Process results from the host filesystem
+            output_json_path_host = os.path.join(analysis_results_host_dir, "analysis_output.json")
+            error_log_path_host = os.path.join(analysis_results_host_dir, "analysis_error.log")
+
+            if os.path.exists(output_json_path_host):
                 try:
-                    self.docker_manager.cleanup_cloned_repo(cloned_repo_path_for_cleanup)
-                    self.logger.info(f"[{analysis_id}] Cleaned up cloned repo: {cloned_repo_path_for_cleanup}")
-                    if analysis: # Check if analysis object exists
-                         analysis.add_log(f"Cleaned up cloned repo: {os.path.basename(cloned_repo_path_for_cleanup)}", "info")
-                         analysis.save()
-                except Exception as e_cleanup:
-                    self.logger.error(f"[{analysis_id}] Error cleaning up cloned repo {cloned_repo_path_for_cleanup}: {e_cleanup}")
-                    if analysis: # Check if analysis object exists
-                        analysis.add_log(f"Error cleaning up repo: {e_cleanup}", "warning")
-                        analysis.save()
-            self.logger.info(f"[{analysis_id}] Background analysis task finished.")
+                    with open(output_json_path_host, 'r') as f:
+                        analysis_results = json.load(f)
+                    analysis.analysis_results = analysis_results
+                    analysis.analysis_status = 'completed'
+                    analysis.error_message = None 
+                    docker_log_callback(f"Successfully loaded analysis_output.json from {output_json_path_host}", "success")
+                except json.JSONDecodeError as e:
+                    self.logger.error(f"Failed to decode analysis_output.json for issue #{issue_number}: {e}")
+                    docker_log_callback(f"Failed to decode analysis_output.json: {e}", "error")
+                    analysis.analysis_status = 'failed'
+                    analysis.error_message = f"Failed to decode analysis_output.json: {e}"
+                except Exception as e_read:
+                    self.logger.error(f"Failed to read analysis_output.json for issue #{issue_number}: {e_read}")
+                    docker_log_callback(f"Failed to read analysis_output.json: {e_read}", "error")
+                    analysis.analysis_status = 'failed'
+                    analysis.error_message = f"Failed to read analysis_output.json: {e_read}"
+
+            else: # analysis_output.json not found
+                docker_log_callback(f"analysis_output.json not found at {output_json_path_host}. Checking for error log.", "warning")
+                analysis.analysis_status = 'failed'
+                analysis.error_message = "Analysis script did not produce an output file (analysis_output.json)."
+                if os.path.exists(error_log_path_host):
+                    try:
+                        with open(error_log_path_host, 'r') as f_err:
+                            error_log_content = f_err.read(2000) # Read up to 2000 chars of the error log
+                        analysis.error_message += f" Error log found: {error_log_content}"
+                        docker_log_callback(f"Found error log content: {error_log_content[:200]}...", "info")
+                    except Exception as e_read_err:
+                        docker_log_callback(f"Could not read analysis_error.log: {e_read_err}", "warning")
+                        analysis.error_message += " Could not read error log file."
+                else:
+                    docker_log_callback(f"analysis_error.log also not found at {error_log_path_host}.", "warning")
+                    analysis.error_message += " No error log file found either."
+            
+            analysis.ended_at = datetime.utcnow()
+            analysis.save()
+            self.logger.info(f"Analysis for issue #{issue_number} finished with status: {analysis.analysis_status}")
+            docker_log_callback(f"Analysis for issue #{issue_number} finished with status: {analysis.analysis_status}", "info")
+
+        except subprocess.CalledProcessError as e:
+            self.logger.error(f"CalledProcessError during analysis for issue #{issue_number if analysis else 'unknown'}: {e.stderr}", exc_info=True)
+            if analysis_reloaded and analysis: # Check if analysis was loaded
+                analysis.analysis_status = 'failed'
+                analysis.error_message = f"Docker operation failed: {e.stderr}"
+                analysis.ended_at = datetime.utcnow()
+                analysis.save()
+        except Exception as e:
+            self.logger.error(f"Unexpected error during analysis for issue #{issue_number if analysis else 'unknown'}: {str(e)}", exc_info=True)
+            if analysis_reloaded and analysis: # Check if analysis was loaded
+                analysis.analysis_status = 'failed'
+                analysis.error_message = f"An unexpected error occurred: {str(e)}"
+                analysis.ended_at = datetime.utcnow()
+                analysis.save()
+        finally:
+            if image_tag_for_cleanup:
+                try:
+                    self.logger.info(f"Cleaning up Docker image {image_tag_for_cleanup}...")
+                    # Use a generic log callback or none for cleanup, as the specific analysis log callback might rely on analysis object state.
+                    cleanup_log_callback = lambda msg, lvl: self.logger.info(f"[Cleanup {image_tag_for_cleanup[:8]}]: {msg}")
+                    # self.docker_manager._run_docker_command(["rmi", "-f", image_tag_for_cleanup], log_callback=cleanup_log_callback, check=False)
+                except Exception as e_rmi:
+                    self.logger.error(f"Error cleaning up image {image_tag_for_cleanup}: {e_rmi}")
+            
+            if build_context_id_for_cleanup:
+                try:
+                    self.logger.info(f"Cleaning up Dockerfile context {build_context_id_for_cleanup}...")
+                    self.docker_manager.cleanup_dockerfile_context(build_context_id_for_cleanup)
+                except Exception as e_cleanup_ctx:
+                    self.logger.error(f"Error cleaning up context {build_context_id_for_cleanup}: {e_cleanup_ctx}")
+            
+            if analysis_reloaded and analysis and analysis.id: # Ensure analysis object exists and has an ID
+                # Clear task from global tracking if it was backgrounded via _ACTIVE_ANIMATIONS or similar mechanism
+                # This part might need adjustment depending on how _analyze_in_background is invoked and tracked by _ACTIVE_ANIMATIONS
+                task_key = f"analysis_{str(analysis.id)}" # Example key, adjust if different
+                if task_key in _ACTIVE_ANIMATIONS: # Using _ACTIVE_ANIMATIONS as a proxy for task tracking
+                    _ACTIVE_ANIMATIONS[task_key]['running'] = False # Mark as not running
+                    # Potentially remove from dict if no longer needed, or let _end_loading_animation handle it
+                    self.logger.info(f"Marked background task {task_key} as completed in finally block.")
 
     def _execute_in_container(self, container_id: str, command: str) -> Dict:
         """Execute a command in the Docker container"""

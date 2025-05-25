@@ -3,71 +3,132 @@ import subprocess
 import logging
 import uuid
 import json
-from typing import Dict, Optional, Any
-import shlex
-import tempfile
-import time
-import docker
-import tarfile
-import io
+from typing import Dict, Optional, Any, Callable
+# import shlex # No longer used directly
+# import tempfile # No longer used directly
+import time # Still used in async create_container simulation path (if that path were still active)
+# import docker # No longer used for client
+from docker.errors import BuildError, APIError, ImageNotFound # Import specific errors
+# import tarfile # No longer used
+# import io # No longer used
 import shutil
+import select # For non-blocking reads
+import platform
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class DockerManager:
-    def __init__(self, simulation_mode=False, use_sudo=None):
-        self.base_image = "repopilot/base:latest"
+    def __init__(self, use_sudo=None):
+        self.base_image = "repopilot/base:latest" 
         self.containers_dir = os.path.join(os.path.expanduser('~'), '.repopilot', 'containers')
         self.dockerfiles_dir = os.path.abspath('docker_files')
         self.clone_dir = os.path.abspath('cloned_repos')
         os.makedirs(self.containers_dir, exist_ok=True)
         os.makedirs(self.dockerfiles_dir, exist_ok=True)
         os.makedirs(self.clone_dir, exist_ok=True)
-        self.simulation_mode = simulation_mode
-        self.client = None
         
         if use_sudo is None:
             try:
-                subprocess.run(["docker", "info"], check=True, capture_output=True)
+                # Try without sudo first
+                subprocess.run(["docker", "info"], check=True, capture_output=True, timeout=5)
                 self.use_sudo = False
-                logger.info("Docker access available without sudo")
-            except (subprocess.SubprocessError, FileNotFoundError):
+                logger.info("Docker access available without sudo.")
+            except (subprocess.SubprocessError, FileNotFoundError, subprocess.TimeoutExpired):
                 try:
-                    subprocess.run(["sudo", "-n", "docker", "info"], check=True, capture_output=True)
+                    # Try with passwordless sudo
+                    subprocess.run(["sudo", "-n", "docker", "info"], check=True, capture_output=True, timeout=5)
                     self.use_sudo = True
-                    logger.info("Docker access available with passwordless sudo")
-                except (subprocess.SubprocessError, FileNotFoundError):
-                    self.use_sudo = True
-                    logger.info("Docker access might require sudo with password or setup.")
+                    logger.info("Docker access available with passwordless sudo.")
+                except (subprocess.SubprocessError, FileNotFoundError, subprocess.TimeoutExpired):
+                    # Fallback: assume sudo might be needed with a password, or Docker isn't set up.
+                    # The actual commands will fail later if Docker isn't usable.
+                    self.use_sudo = True # Default to trying with sudo if checks fail or are inconclusive.
+                    logger.warning("Could not confirm Docker access without sudo or with passwordless sudo. Will attempt with sudo. Ensure Docker is running and permissions are set.")
         else:
             self.use_sudo = use_sudo
-        
-        if not simulation_mode:
-            try:
-                self.client = docker.from_env()
-                if not self.client.ping():
-                    logger.warning("Docker client initialized but failed to ping Docker server. Docker might not be running correctly.")
-                    self.simulation_mode = True
-                else:
-                    logger.info("Docker client initialized and server ping successful.")
-            except docker.errors.DockerException as e:
-                logger.warning(f"Failed to initialize Docker client: {e}. Switching to simulation mode.")
-                self.simulation_mode = True
-            except Exception as e_gen:
-                logger.warning(f"An unexpected error occurred during Docker client initialization: {e_gen}. Switching to simulation mode.")
-                self.simulation_mode = True
-        
-        if self.simulation_mode:
-            logger.info("DockerManager is in SIMULATION MODE.")
-            self.client = None
     
-    def _run_docker_command(self, args, **kwargs):
-        """Run a docker command with or without sudo as needed"""
+    def _run_docker_command(self, args: list, log_callback: Optional[Callable[[str, str], None]] = None, check: bool = False, **kwargs) -> subprocess.CompletedProcess:
+        """
+        Run a docker command with or without sudo as needed, streaming output if a callback is provided.
+        The 'check' parameter behaves like in subprocess.run. If True and the process exits with a non-zero code,
+        CalledProcessError is raised.
+        Returns a CompletedProcess-like object (or raises an error if check=True).
+        Additional kwargs are passed to Popen.
+        """
         cmd = ["sudo", "docker"] if self.use_sudo else ["docker"]
         cmd.extend(args)
-        return subprocess.run(cmd, **kwargs)
         
+        full_command_str = ' '.join(cmd) # For logging
+        logger.debug(f"Executing Docker command: {full_command_str}")
+        if log_callback:
+            log_callback(f"Executing: docker {' '.join(args)}", "info")
+
+        # Ensure text=True is not passed directly to Popen if we handle decoding
+        kwargs.pop('text', None)
+        kwargs.pop('capture_output', None) # We manage pipes directly
+
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False, **kwargs) # text=False to handle bytes
+
+        stdout_lines = []
+        stderr_lines = []
+
+        try:
+            # Use select for non-blocking reads if on Unix-like system
+            # For Windows, this approach would need adjustment (e.g., threads)
+            # Assuming Linux environment for Docker operations primarily.
+            if os.name != 'posix':
+                 logger.warning("_run_docker_command uses select() for non-blocking I/O, which is POSIX-specific. Streaming might behave differently on other OS.")
+
+            streams = [process.stdout, process.stderr]
+            while streams:
+                readable_streams, _, _ = select.select(streams, [], [], 0.1) # Small timeout
+                for stream in readable_streams:
+                    line_bytes = stream.readline()
+                    if line_bytes:
+                        line = line_bytes.decode('utf-8', errors='replace').strip()
+                        if stream is process.stdout:
+                            stdout_lines.append(line)
+                            if log_callback:
+                                try:
+                                    log_callback(line, "stdout")
+                                except Exception as e_cb_stdout:
+                                    logger.error(f"Error in stdout log_callback: {e_cb_stdout}")
+                        elif stream is process.stderr:
+                            stderr_lines.append(line)
+                            if log_callback:
+                                try:
+                                    log_callback(line, "stderr")
+                                except Exception as e_cb_stderr:
+                                    logger.error(f"Error in stderr log_callback: {e_cb_stderr}")
+                    else: # End of stream
+                        streams.remove(stream)
+                
+                if process.poll() is not None and not readable_streams: # Process finished and no more data in pipes
+                    break
+        finally:
+            # Ensure process is cleaned up
+            if process.poll() is None: # If still running
+                try:
+                    process.terminate() # Try to terminate gracefully
+                    process.wait(timeout=5) # Wait for termination
+                except subprocess.TimeoutExpired:
+                    process.kill() # Force kill if terminate fails
+                except Exception as e_term:
+                    logger.error(f"Error during Popen process cleanup: {e_term}")
+            
+            # Close pipes
+            if process.stdout: process.stdout.close()
+            if process.stderr: process.stderr.close()
+            
+        returncode = process.returncode if process.returncode is not None else -1 # Ensure returncode is set
+
+        if check and returncode != 0:
+            raise subprocess.CalledProcessError(returncode, cmd, output='\\n'.join(stdout_lines), stderr='\\n'.join(stderr_lines))
+
+        # Mimic CompletedProcess object
+        return subprocess.CompletedProcess(args=cmd, returncode=returncode, stdout='\\n'.join(stdout_lines), stderr='\\n'.join(stderr_lines))
+
     async def create_container(self, repo_url: str, repo_name: str, issue_number: int, 
                               branch: str = 'main', access_token: Optional[str] = None,
                               issue_body_for_txt_file: Optional[str] = None) -> Dict[str, Any]:
@@ -88,79 +149,50 @@ class DockerManager:
             
             self._save_container_config(container_id, container_config)
             
-            if self.simulation_mode:
-                logger.info(f"[SIMULATION] Creating container {container_name} for issue #{issue_number} in {repo_name} with branch {branch}")
+            dockerfile_path = self._create_custom_dockerfile(container_id, repo_url, repo_name, branch, access_token, issue_body_content=issue_body_for_txt_file)
+            
+            custom_image_name = f"repopilot-issue-{container_id[:8]}"
+            logger.info(f"Building custom Docker image for issue #{issue_number} in {repo_name} with branch {branch}")
+            
+            build_cmd = [
+                "build",
+                "-t", custom_image_name,
+                "-f", dockerfile_path,
+                "--build-arg", f"REPO_URL={repo_url}",
+                "--build-arg", f"BRANCH={branch}"
+            ]
+            
+            if access_token:
+                build_cmd.extend(["--build-arg", f"ACCESS_TOKEN={access_token}"])
                 
-                sim_workspace = os.path.join(self.containers_dir, container_id, 'workspace')
-                os.makedirs(sim_workspace, exist_ok=True)
-                
-                repo_dir = os.path.join(sim_workspace, repo_name.split('/')[-1])
-                os.makedirs(repo_dir, exist_ok=True)
-                
-                with open(os.path.join(repo_dir, 'README.md'), 'w') as f:
-                    f.write(f"""# Simulated Clone of {repo_name}
-
-This is a simulated repository clone for issue #{issue_number}.
-Repository URL: {repo_url}
-Branch: {branch}
-                    """)
-                
-                time.sleep(1)
-                
-                container_config['status'] = 'running'
-                container_config['container_short_id'] = 'sim-' + container_id[:12]
-                container_config['simulation'] = True
-                container_config['workspace_path'] = sim_workspace
-                self._save_container_config(container_id, container_config)
-                
-                logger.info(f"[SIMULATION] Container {container_name} created successfully")
-                return container_config
-                
-            else:
-                import pdb; pdb.set_trace()
-                dockerfile_path = self._create_custom_dockerfile(container_id, repo_url, repo_name, branch, access_token, issue_body_content=issue_body_for_txt_file)
-                
-                custom_image_name = f"repopilot-issue-{container_id[:8]}"
-                logger.info(f"Building custom Docker image for issue #{issue_number} in {repo_name} with branch {branch}")
-                
-                build_cmd = [
-                    "build",
-                    "-t", custom_image_name,
-                    "-f", dockerfile_path,
-                    "--build-arg", f"REPO_URL={repo_url}",
-                    "--build-arg", f"BRANCH={branch}"
-                ]
-                
-                if access_token:
-                    build_cmd.extend(["--build-arg", f"ACCESS_TOKEN={access_token}"])
-                    
-                build_cmd.append(os.path.dirname(dockerfile_path))
-                
-                process = self._run_docker_command(build_cmd, capture_output=True, text=True, check=True)
-                
-                logger.info(f"Creating container {container_name} for issue #{issue_number} in {repo_name} on branch {branch}")
-                
-                run_cmd = [
-                    "run", "-d",
-                    "--name", container_name,
-                    "-e", f"REPO_URL={repo_url}",
-                    "-e", f"ISSUE_NUMBER={issue_number}",
-                    "-e", f"BRANCH={branch}",
-                    custom_image_name,
-                    "/bin/bash", "-c", "tail -f /dev/null"
-                ]
-                
-                process = self._run_docker_command(run_cmd, capture_output=True, text=True, check=True)
-                container_short_id = process.stdout.strip()
-                
-                container_config['status'] = 'running'
-                container_config['container_short_id'] = container_short_id
-                container_config['custom_image_name'] = custom_image_name
-                self._save_container_config(container_id, container_config)
-                
-                logger.info(f"Container {container_name} ({container_short_id}) created successfully")
-                
-                return container_config
+            build_cmd.append(os.path.dirname(dockerfile_path))
+            
+            process = self._run_docker_command(build_cmd, capture_output=True, text=True, check=True)
+            
+            logger.info(f"Creating container {container_name} for issue #{issue_number} in {repo_name} on branch {branch}")
+            
+            run_cmd = [
+                "run", "-d",
+                "--name", container_name,
+                "-e", f"REPO_URL={repo_url}",
+                "-e", f"ISSUE_NUMBER={issue_number}",
+                "-e", f"BRANCH={branch}",
+                "-p", "11434:11434",
+                custom_image_name,
+                "/bin/bash", "-c", "tail -f /dev/null"
+            ]
+            
+            process = self._run_docker_command(run_cmd, capture_output=True, text=True, check=True)
+            container_short_id = process.stdout.strip()
+            
+            container_config['status'] = 'running'
+            container_config['container_short_id'] = container_short_id
+            container_config['custom_image_name'] = custom_image_name
+            self._save_container_config(container_id, container_config)
+            
+            logger.info(f"Container {container_name} ({container_short_id}) created successfully")
+            
+            return container_config
             
         except subprocess.CalledProcessError as e:
             logger.error(f"Failed to create container: {e.stderr}")
@@ -177,7 +209,43 @@ Branch: {branch}
                 container_config['error'] = str(e)
                 self._save_container_config(container_id, container_config)
             raise
-    
+    """
+    # Construct the correct GitHub URL with branch/tag
+if [ "$BRANCH" != "main" ] && [ "$BRANCH" != "master" ]; then
+    # Format the repo URL to include the branch/tag
+    if [[ "$BRANCH" =~ ^v[0-9] ]]; then
+        # For version tags, use the archive download URL
+        CLONE_URL="$REPO_URL/archive/refs/tags/$BRANCH.zip"
+        
+        # Try to download the archive
+        if curl -L -o "$WORKSPACE_DIR/$BRANCH.zip" "$CLONE_URL"; then
+            echo "Downloaded version archive, extracting..."
+            unzip -q "$WORKSPACE_DIR/$BRANCH.zip" -d "$WORKSPACE_DIR"
+            
+            # Find the extracted directory and rename to expected repo name
+            EXTRACTED_DIR=$(find "$WORKSPACE_DIR" -maxdepth 1 -type d -name "$REPO_NAME-*")
+            if [ -n "$EXTRACTED_DIR" ]; then
+                # Handle cases where there might be multiple matches if repo_name is a substring
+                # Prefer the shortest match or the one that looks most like REPO_NAME-BRANCH or REPO_NAME-TAG
+                PREFERRED_EXTRACTED_DIR=$(echo "$EXTRACTED_DIR" | awk -v repo="$REPO_NAME" -v branch="$BRANCH" '
+                    BEGIN {{ best_match = ""; min_len = 9999 }}
+                    {{ 
+                        current_len = length($0);
+                        if ( ($0 ~ repo "-" branch "$") || ($0 ~ repo "-" substr(branch,2) "$") ) {{ best_match = $0; break; }}
+                        if (current_len < min_len) {{ min_len = current_len; best_match = $0; }}
+                    }}
+                    END {{ print best_match }}')
+                mv "$PREFERRED_EXTRACTED_DIR" "$WORKSPACE_DIR/$REPO_NAME"
+                echo "Extracted archive to $WORKSPACE_DIR/$REPO_NAME"
+                cd "$WORKSPACE_DIR/$REPO_NAME"
+                echo "Successfully checked out tag $BRANCH"
+                exit 0
+            fi
+        fi
+    fi
+fi
+
+    """
     def _create_custom_dockerfile(self, container_id: str, repo_url: str, repo_name: str, branch: str = 'main', 
                                   access_token: Optional[str] = None, 
                                   issue_body_content: Optional[str] = None) -> str:
@@ -236,40 +304,7 @@ echo "=======================\n"
 mkdir -p "$WORKSPACE_DIR"
 cd "$WORKSPACE_DIR"
 
-# Construct the correct GitHub URL with branch/tag
-if [ "$BRANCH" != "main" ] && [ "$BRANCH" != "master" ]; then
-    # Format the repo URL to include the branch/tag
-    if [[ "$BRANCH" =~ ^v[0-9] ]]; then
-        # For version tags, use the archive download URL
-        CLONE_URL="$REPO_URL/archive/refs/tags/$BRANCH.zip"
-        
-        # Try to download the archive
-        if curl -L -o "$WORKSPACE_DIR/$BRANCH.zip" "$CLONE_URL"; then
-            echo "Downloaded version archive, extracting..."
-            unzip -q "$WORKSPACE_DIR/$BRANCH.zip" -d "$WORKSPACE_DIR"
-            
-            # Find the extracted directory and rename to expected repo name
-            EXTRACTED_DIR=$(find "$WORKSPACE_DIR" -maxdepth 1 -type d -name "$REPO_NAME-*")
-            if [ -n "$EXTRACTED_DIR" ]; then
-                # Handle cases where there might be multiple matches if repo_name is a substring
-                # Prefer the shortest match or the one that looks most like REPO_NAME-BRANCH or REPO_NAME-TAG
-                PREFERRED_EXTRACTED_DIR=$(echo "$EXTRACTED_DIR" | awk -v repo="$REPO_NAME" -v branch="$BRANCH" '
-                    BEGIN {{ best_match = ""; min_len = 9999 }}
-                    {{ 
-                        current_len = length($0);
-                        if ( ($0 ~ repo "-" branch "$") || ($0 ~ repo "-" substr(branch,2) "$") ) {{ best_match = $0; break; }}
-                        if (current_len < min_len) {{ min_len = current_len; best_match = $0; }}
-                    }}
-                    END {{ print best_match }}')
-                mv "$PREFERRED_EXTRACTED_DIR" "$WORKSPACE_DIR/$REPO_NAME"
-                echo "Extracted archive to $WORKSPACE_DIR/$REPO_NAME"
-                cd "$WORKSPACE_DIR/$REPO_NAME"
-                echo "Successfully checked out tag $BRANCH"
-                exit 0
-            fi
-        fi
-    fi
-fi
+
 
 # If we get here, either the archive download failed or it's a regular branch
 # Fall back to standard git clone
@@ -387,6 +422,9 @@ ENV REPO_URL=$REPO_URL
 ENV BRANCH=$BRANCH
 ENV ACCESS_TOKEN=$ACCESS_TOKEN
 ENV DEBIAN_FRONTEND=noninteractive
+# Point to Ollama server on the host machine
+ENV OLLAMA_HOST=host.docker.internal:11434
+ENV REPO_BASENAME={repo_basename}
 
 # Copy the clone script (from build context) into the image
 # Permissions should be preserved from the host if host script is executable.
@@ -408,14 +446,21 @@ RUN pip install --no-cache-dir -r /app/container_agent_requirements.txt
 # Run the clone script
 RUN /app/clone_repo.sh
 
+# Ollama setup (serve, pull) is removed from here,
+# as we are now expecting to connect to Ollama on the host.
+
 # Execute the container agent script and save its output and errors
-RUN python3 /app/container_agent.py > /app/analysis_output.json 2> /app/analysis_error.log || true
+# RUN echo \"Executing container_agent.py...\" && \\
+#     (python3 /app/container_agent.py > /workspace/analysis_results/analysis_output.json 2> /workspace/analysis_results/analysis_error.log || touch /workspace/analysis_results/agent_failed_but_run_completed) && \\
+#     echo \"Container agent execution attempt finished.\"
 
 # Set working directory to the cloned repo
 WORKDIR /workspace/{repo_basename}
 
 # Default command (can be overridden)
-CMD [\"/bin/bash\"]
+# CMD [\"/bin/bash\"] # CMD will be overridden by ENTRYPOINT or used as args to ENTRYPOINT if not executable form
+
+ENTRYPOINT ["python3", "/app/container_agent.py"]
 """
         
         with open(dockerfile_path, 'w') as f:
@@ -535,47 +580,39 @@ CMD [\"/bin/bash\"]
             logger.error(f"Error removing container: {str(e)}")
             return False
     
-    def execute_command(self, container_id: str, command: str) -> Optional[str]:
-        """Execute a command in a container"""
+    def execute_command(self, container_id: str, command: str, log_callback: Optional[Callable[[str, str], None]] = None) -> Optional[str]:
+        """Execute a command in a container, optionally streaming output."""
         try:
             container_config = self._get_container_config(container_id)
             if not container_config:
                 logger.error(f"Container config not found for ID: {container_id}")
+                if log_callback: log_callback(f"Cannot execute command, container {container_id} not found or not running.", "error")
                 return None
                 
-            if container_config.get('simulation', False):
-                logger.info(f"[SIMULATION] Executing command in container {container_config['container_name']}: {command}")
-                
-                return f"[SIMULATION] Would execute: {command}\nSimulated output."
-            
             container_name = container_config.get('container_name')
             if not container_name:
                 logger.error(f"Container name not found in config for ID: {container_id}")
+                if log_callback: log_callback(f"Cannot execute command, container {container_id} not found or not running.", "error")
                 return None
                 
             if container_config.get('status') != 'running':
                 logger.error(f"Container {container_name} is not running")
+                if log_callback: log_callback(f"Cannot execute command, container {container_name} is not running.", "error")
                 return None
                 
             logger.info(f"Executing command in container {container_name}: {command}")
-            process = self._run_docker_command(
-                ["exec", container_name, "/bin/bash", "-c", command],
-                capture_output=True, 
-                text=True
-            )
-            
-            if process.returncode != 0:
-                logger.error(f"Command execution failed: {process.stderr}")
-                return None
-                
-            return process.stdout
-            
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to execute command: {e.stderr}")
-            return None
-            
+            if log_callback: log_callback(f"Executing in {container_name}: {command}", "info")
+
+            cmd_args = ["exec", container_name, "/bin/bash", "-c", command]
+            process_result = self._run_docker_command(cmd_args, log_callback=log_callback, check=False)
+            if process_result.returncode != 0:
+                # Stderr is already streamed by log_callback
+                logger.error(f"Command execution failed in {container_name} (code {process_result.returncode}). Summary: {process_result.stderr[:200]}")
+                return None # Or return error indication
+            return process_result.stdout # Return collected stdout
         except Exception as e:
-            logger.error(f"Error executing command: {str(e)}")
+            logger.error(f"Exception executing command in {container_name}: {str(e)}")
+            if log_callback: log_callback(f"Exception during exec: {str(e)}", "error")
             return None
     
     def get_container_logs(self, container_id: str) -> Optional[str]:
@@ -586,10 +623,6 @@ CMD [\"/bin/bash\"]
                 logger.error(f"Container config not found for ID: {container_id}")
                 return None
                 
-            if container_config.get('simulation', False):
-                logger.info(f"[SIMULATION] Getting logs from container {container_config['container_name']}")
-                return "[SIMULATION] Container logs would appear here."
-            
             container_name = container_config.get('container_name')
             if not container_name:
                 logger.error(f"Container name not found in config for ID: {container_id}")
@@ -718,107 +751,94 @@ CMD [\"/bin/bash\"]
                 return json.load(f)
         except (IOError, json.JSONDecodeError) as e:
             logger.error(f"Error reading or parsing container config {config_path}: {e}")
-            return None 
+            return None
 
-    def _copy_file_from_image_to_host(self, image_id, container_path, host_path):
+    def _copy_file_from_image_to_host(self, image_id_or_tag, container_path, host_path, log_callback: Optional[Callable[[str, str], None]] = None):
         """
         Copies a file from a given path inside an image to a specified host path.
-        It does this by creating a temporary container from the image,
-        copying the file out, and then removing the temporary container.
+        Uses Docker CLI commands via _run_docker_command.
+        Accepts an optional log_callback for streaming.
         """
-        if self.simulation_mode or not self.client:
-            logger.info(f"[SIMULATION] Would copy {container_path} from image {image_id} to {host_path}")
-            # os.makedirs(os.path.dirname(host_path), exist_ok=True)
-            # with open(host_path, 'w') as f_dummy:
-            #     f_dummy.write(f"Simulated content for {os.path.basename(host_path)}")
-            return True # Simulate success
-
-        temp_container = None
+        temp_container_id_val = None # Renamed to avoid conflict with temp_container_id in some scopes
+        temp_container_name = f"repopilot-copy-temp-{uuid.uuid4().hex[:12]}"
         try:
-            logger.debug(f"Creating temporary container from image {image_id} to copy {container_path}")
-            temp_container = self.client.containers.create(image_id) # command is irrelevant
+            create_cmd_args = ["create", "--name", temp_container_name, image_id_or_tag]
+            logger.debug(f"Creating temporary container from image {image_id_or_tag} with name {temp_container_name}")
+            if log_callback: log_callback(f"Creating temp container {temp_container_name} from {image_id_or_tag} for copy...", "info")
             
-            os.makedirs(os.path.dirname(host_path), exist_ok=True)
+            process_create = self._run_docker_command(create_cmd_args, log_callback=log_callback, check=False)
 
-            logger.debug(f"Attempting to get archive for {container_path} from container {temp_container.id}")
-            stream, stat = temp_container.get_archive(container_path)
+            if process_create.returncode != 0:
+                err_msg = f"Failed to create temporary container {temp_container_name} from image {image_id_or_tag}. Stderr: {process_create.stderr.strip()}"
+                logger.error(err_msg)
+                if log_callback: log_callback(err_msg, "error")
+                if process_create.stdout.strip() and log_callback: # Log stdout as well
+                    log_callback(f"Stdout from failed create: {process_create.stdout.strip()}", "info")
+                return False
             
-            tar_bytes = b"".join(stream)
+            temp_container_id_val = process_create.stdout.strip()
+            if not temp_container_id_val:
+                 logger.error(f"Temporary container ID not captured from stdout for image {image_id_or_tag} using name {temp_container_name}. stdout: '{process_create.stdout}', stderr: '{process_create.stderr}'")
+                 if log_callback: log_callback(f"Warning: Temp container ID not found for {temp_container_name}, copy may fail or use name.", "warning")
+                 temp_container_id_val = temp_container_name # Fallback to using name for cp and rm
+                 # If create returned 0 but no ID, this is unusual. Proceed with name.
             
-            # Check if tar_bytes is empty, which happens if path not found in get_archive
-            if not tar_bytes:
-                logger.warning(f"No data returned from get_archive for {container_path} in image {image_id}. File likely does not exist at this path in the image.")
+            if log_callback: log_callback(f"Temporary container {temp_container_id_val[:12]} (name: {temp_container_name}) created.", "info")
+
+            os.makedirs(os.path.dirname(host_path), exist_ok=True)
+            
+            docker_source_path = f"{temp_container_id_val}:{container_path}" # Use temp_container_id_val (actual ID or name)
+            cp_cmd_args = ["cp", docker_source_path, host_path]
+            logger.debug(f"Copying {docker_source_path} to {host_path}")
+            if log_callback: log_callback(f"Copying {container_path} from temp container to {host_path}...", "info")
+            
+            process_cp = self._run_docker_command(cp_cmd_args, log_callback=log_callback, check=False)
+
+            if process_cp.returncode != 0:
+                err_msg = f"Failed to copy {container_path} from temp container {temp_container_id_val[:12]}. Stderr: {process_cp.stderr.strip()}"
+                logger.error(err_msg)
+                if log_callback: log_callback(err_msg, "error")
+                if process_cp.stdout.strip() and log_callback:
+                    log_callback(f"Stdout from failed cp: {process_cp.stdout.strip()}", "info")
                 return False
 
-            with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode='r') as tar:
-                tar_filename = os.path.basename(container_path)
-                try:
-                    member_info = tar.getmember(tar_filename)
-                    extracted_file_obj = tar.extractfile(member_info)
-                    if extracted_file_obj:
-                        with open(host_path, 'wb') as f_out:
-                            f_out.write(extracted_file_obj.read())
-                        logger.info(f"Successfully copied {container_path} from image {image_id} to {host_path}")
-                        return True
-                    else:
-                        logger.error(f"Failed to extract file object for {tar_filename} from tar archive (image: {image_id}).")
-                        return False
-                except KeyError:
-                    all_members = tar.getmembers()
-                    if len(all_members) == 1 and all_members[0].isfile():
-                        logger.info(f"Found single file '{all_members[0].name}' in archive, extracting as {tar_filename} to {host_path}.")
-                        extracted_file_obj = tar.extractfile(all_members[0])
-                        if extracted_file_obj:
-                            with open(host_path, 'wb') as f_out:
-                                f_out.write(extracted_file_obj.read())
-                            logger.info(f"Successfully extracted single member '{all_members[0].name}' as {tar_filename} to {host_path}")
-                            return True
-                    logger.error(f"File '{tar_filename}' (from {container_path}) not found in tar archive from image {image_id}. Members: {[m.name for m in all_members]}")
-                    return False
-        except docker.errors.NotFound as e_nf: # Specific error if get_archive path not found
-            logger.warning(f"Path {container_path} not found in temp container {temp_container.id if temp_container else 'UnknownTempID'} (from image {image_id}) via get_archive: {e_nf}")
-            return False
-        except tarfile.ReadError as e_tar:
-            logger.error(f"Tarfile read error for {container_path} from image {image_id}: {e_tar}. Tar data might be empty/corrupt.")
-            return False
-        except Exception as e: # General errors
-            logger.error(f"General error copying {container_path} from image {image_id} to {host_path}: {str(e)}", exc_info=True)
+            if log_callback: log_callback(f"Successfully copied {container_path} to {host_path}.", "success")
+            return True
+
+        except Exception as e:
+            logger.error(f"General error in _copy_file_from_image_to_host for image {image_id_or_tag}: {str(e)}", exc_info=True)
+            if log_callback: log_callback(f"Error during file copy: {str(e)}", "error")
             return False
         finally:
-            if temp_container:
-                try:
-                    logger.debug(f"Removing temporary container {temp_container.id}")
-                    temp_container.remove(force=True) # force=True to ensure removal
-                except docker.errors.NotFound:
-                    logger.debug(f"Temporary container {temp_container.id} already removed or not found during cleanup.")
-                except Exception as e_remove:
-                    logger.error(f"Error removing temporary container {temp_container.id}: {e_remove}")
-        return False # Should have returned True earlier on success
+            # Use temp_container_id_val if set (actual ID from create or the name), else fallback to temp_container_name
+            id_to_remove = temp_container_id_val if temp_container_id_val else temp_container_name
+            if id_to_remove: # Ensure we have something to attempt removal on
+                logger.debug(f"Attempting to remove temporary container: {id_to_remove}")
+                if log_callback: log_callback(f"Cleaning up temporary container {id_to_remove[:12]}...", "info")
+                rm_cmd_args = ["rm", "-f", id_to_remove]
+                # For cleanup, we typically don't need to stream its output in detail unless debugging cleanup itself.
+                # Pass a minimal or no callback for cleanup.
+                process_rm = self._run_docker_command(rm_cmd_args, log_callback=None, check=False) 
+                if process_rm.returncode != 0:
+                    err_msg = f"Failed to remove temporary container {id_to_remove}. Stderr: {process_rm.stderr.strip()}"
+                    logger.error(err_msg)
+                    if log_callback: log_callback(err_msg, "warning") # Log as warning as main op might have succeeded
+                else:
+                    if log_callback: log_callback(f"Successfully removed temporary container {id_to_remove[:12]}.", "info")
+            else:
+                 logger.debug("No temporary container ID or name was set, skipping cleanup.")
+                 if log_callback: log_callback("Skipped temp container cleanup as no ID/name was available.", "debug")
 
-    def clone_repo_and_create_image(self, repo_url, repo_name, issue_number, issue_body, branch_name=None):
+    def clone_repo_and_create_image(self, repo_url, repo_name, issue_number, issue_body, branch_name=None, log_callback: Optional[Callable[[str, str], None]] = None):
         build_context_id = str(uuid.uuid4())
         
         build_context_path = os.path.join(self.dockerfiles_dir, build_context_id)
         os.makedirs(build_context_path, exist_ok=True)
 
-        build_logs_list = []
-
-        if self.simulation_mode or not self.client:
-            logger.info(f"[SIMULATION] Would build image for {repo_name} issue #{issue_number} context {build_context_id}")
-            sim_output_path = os.path.join(build_context_path, "analysis_output.json")
-            sim_error_path = os.path.join(build_context_path, "analysis_error.log")
-            try:
-                with open(sim_output_path, 'w') as f_out:
-                    json.dump({"issue_summary": "Simulated summary", "code_analysis_summary": "Simulated code analysis", "proposed_solutions": ["Simulated solution 1"]}, f_out)
-                with open(sim_error_path, 'w') as f_err:
-                    f_err.write("Simulated error log content if any.")
-                logger.info(f"[SIMULATION] Created dummy output files in {build_context_path}")
-            except IOError as e_io_sim:
-                logger.error(f"[SIMULATION] Error creating dummy files: {e_io_sim}")
-
-            return f"simulated_image_id_{build_context_id[:8]}", build_context_id, ["Simulated build log line 1"], None
+        build_logs_list = [] # This will now capture internal logs and serve as a summary if callback is not exhaustive.
 
         try:
+            if log_callback: log_callback(f"Preparing build context {build_context_id} for {repo_name} issue #{issue_number}", "info")
             dockerfile_path = self._create_custom_dockerfile(
                 container_id=build_context_id,
                 repo_url=repo_url,
@@ -829,79 +849,106 @@ CMD [\"/bin/bash\"]
             )
 
             logger.info(f"Building Docker image with context: {build_context_path}, Dockerfile: {os.path.basename(dockerfile_path)}")
+            if log_callback: log_callback(f"Dockerfile created at {dockerfile_path}. Starting image build.", "info")
+            
             image_tag = f"repopilot-issue-{build_context_id[:8]}"
-            image = None 
             
-            response = self.client.api.build(
-                path=build_context_path,
-                dockerfile=os.path.basename(dockerfile_path),
-                tag=image_tag,
-                rm=True,
-                forcerm=True,
-                pull=True,
-                decode=True
-            )
+            build_cmd_args = [
+                "build",
+                "-t", image_tag,
+                "-f", dockerfile_path,
+            ]
+
+            # Add host.docker.internal mapping for Linux Docker builds
+            # to allow container to connect to Ollama running on the host.
+            # if platform.system() == "Linux":
+            #     build_cmd_args.append("--add-host=host.docker.internal:host-gateway")
+
+            build_cmd_args.append(build_context_path)
+
+            logger.info(f"Executing Docker build command: docker {' '.join(build_cmd_args)}")
+            # build_logs_list will collect internal DockerManager logs, subprocess output is streamed by callback
             
-            for chunk in response:
-                if 'stream' in chunk:
-                    log_line = chunk['stream'].strip()
-                    if log_line:
-                        logger.info(f"Build log: {log_line}")
-                        build_logs_list.append(log_line)
-                elif 'errorDetail' in chunk:
-                    error_message = chunk['errorDetail']['message']
-                    logger.error(f"Docker Image Build Error: {error_message}")
-                    build_logs_list.append(f"ERROR: {error_message}")
-                    raise docker.errors.BuildError(error_message, build_logs_list)
+            process_result = self._run_docker_command(build_cmd_args, log_callback=log_callback, check=False) # check=False to handle error manually
 
-            try:
-                image = self.client.images.get(image_tag)
-                logger.info(f"Successfully built image: {image.id} with tags: {image.tags}")
-            except docker.errors.ImageNotFound:
-                logger.error(f"Build failed for image {image_tag}. Check build logs above.")
-                full_build_log = "\\n".join(build_logs_list)
-                raise docker.errors.BuildError(f"Image {image_tag} not found after build. Logs: {full_build_log}", build_logs_list)
+            # Collect stdout/stderr from process_result if needed, though callback should handle streaming
+            # For build_logs_list, we might add a summary or key messages here.
+            # if process_result.stdout: build_logs_list.extend(process_result.stdout.splitlines()) # Already handled by callback
 
-            output_json_host_path = os.path.join(self.dockerfiles_dir, build_context_id, "analysis_output.json")
-            error_log_host_path = os.path.join(self.dockerfiles_dir, build_context_id, "analysis_error.log")
+            if process_result.returncode != 0:
+                error_message = f"Docker image build failed (return code {process_result.returncode})."
+                # Stderr is captured by callback, but also available in process_result.stderr
+                if process_result.stderr:
+                    # error_message += f" Stderr: {process_result.stderr.strip()}" # Redundant if streamed
+                    logger.error(f"Build Stderr (summary): {process_result.stderr.strip()[:500]}...") # Log a summary
+                
+                logger.error(error_message)
+                build_logs_list.append(f"ERROR: {error_message}") # Add to local log summary
+                if log_callback: log_callback(f"ERROR: {error_message}", "error")
+                
+                # Constructing a BuildError-like structure for the return
+                # The original BuildError took (msg, build_log_list)
+                # Here, build_log is streamed, so we pass the summary collected in build_logs_list
+                raise BuildError(error_message, build_logs_list)
 
-            logger.info(f"Attempting to copy analysis files from image {image.id} to host for build context {build_context_id}")
-            copy_output_success = self._copy_file_from_image_to_host(image.id, "/app/analysis_output.json", output_json_host_path)
-            copy_error_success = self._copy_file_from_image_to_host(image.id, "/app/analysis_error.log", error_log_host_path)
+            image_id_or_tag_for_copy = image_tag 
+            logger.info(f"Successfully built and tagged image: {image_tag}")
+            if log_callback: log_callback(f"Successfully built and tagged image: {image_tag}", "success")
+            build_logs_list.append(f"Image built: {image_tag}")
+
+
+            # output_json_host_path = os.path.join(self.dockerfiles_dir, build_context_id, "analysis_output.json")
+            # error_log_host_path = os.path.join(self.dockerfiles_dir, build_context_id, "analysis_error.log")
+
+            # logger.info(f"Attempting to copy analysis files from image {image_id_or_tag_for_copy} to host for build context {build_context_id}")
+            # if log_callback: log_callback(f"Copying analysis files from image {image_id_or_tag_for_copy}...", "info")
             
-            if not copy_output_success:
-                 build_logs_list.append("Warning: Failed to copy analysis_output.json from image to host.")
-            if not copy_error_success:
-                 build_logs_list.append("Warning: Failed to copy analysis_error.log from image to host.")
+            # logger.info(f"Target for analysis_output.json: {output_json_host_path}")
+            # if log_callback: log_callback(f"Target for analysis_output.json: {output_json_host_path}", "debug")
+            # copy_output_success = self._copy_file_from_image_to_host(image_id_or_tag_for_copy, "/workspace/analysis_results/analysis_output.json", output_json_host_path, log_callback) 
+            # copy_error_success = self._copy_file_from_image_to_host(image_id_or_tag_for_copy, "/workspace/analysis_results/analysis_error.log", error_log_host_path, log_callback)
             
-            return image.id, build_context_id, build_logs_list, None # repo_dir is None
+            # if not copy_output_success:
+            #      log_msg = "Warning: Failed to copy analysis_output.json from image to host."
+            #      build_logs_list.append(log_msg)
+            #      if log_callback: log_callback(log_msg, "warning")
+            # if not copy_error_success:
+            #      log_msg = "Warning: Failed to copy analysis_error.log from image to host."
+            #      build_logs_list.append(log_msg)
+            #      if log_callback: log_callback(log_msg, "warning")
+            
+            return image_id_or_tag_for_copy, build_context_id, build_logs_list, None # repo_dir is None
 
-        except docker.errors.BuildError as e_build: # Corrected variable name
-            logger.error(f"Docker BuildError for {repo_name} issue #{issue_number}: {e_build.msg}") # Use e_build.msg
-            error_log_details = "\n".join(e_build.build_log) if e_build.build_log else str(e_build.msg)
+        except BuildError as e_build:
+            logger.error(f"Docker BuildError for {repo_name} issue #{issue_number}: {e_build.msg}")
+            # build_log is now part of e_build.msg or streamed if callback was used
+            error_log_details = e_build.msg # Or construct from e_build.build_log if still populated
             build_logs_list.append(f"Build Failed: {error_log_details}")
-            # Attempt to cleanup build context even on build failure
-            # self.cleanup_dockerfile_context(build_context_id) # Temporarily disabled for easier debugging of build errors
+            if log_callback: log_callback(f"Build Failed: {error_log_details}", "error")
+            
             logger.warning(f"Dockerfile context for build_id {build_context_id} has been preserved for debugging due to BuildError.")
             return None, build_context_id, build_logs_list, None
-        except docker.errors.APIError as e_api:
+        except APIError as e_api: # This error might be less relevant now if not using docker-py client directly
             logger.error(f"Docker APIError for {repo_name} issue #{issue_number}: {e_api}", exc_info=True)
-            build_logs_list.append(f"Docker API Error: {str(e_api)}")
+            err_msg = f"Docker API Error: {str(e_api)}"
+            build_logs_list.append(err_msg)
+            if log_callback: log_callback(err_msg, "error")
             self.cleanup_dockerfile_context(build_context_id)
             return None, build_context_id, build_logs_list, None
-        except Exception as e_gen: # Corrected variable name and added content
+        except Exception as e_gen:
             logger.error(f"General error in clone_repo_and_create_image for {repo_name} issue #{issue_number}: {str(e_gen)}", exc_info=True)
-            build_logs_list.append(f"General Error: {str(e_gen)}")
-            self.cleanup_dockerfile_context(build_context_id) # Attempt cleanup
+            err_msg = f"General Error: {str(e_gen)}"
+            build_logs_list.append(err_msg)
+            if log_callback: log_callback(err_msg, "error")
+            self.cleanup_dockerfile_context(build_context_id)
             return None, build_context_id, build_logs_list, None
-        # Removed finally block that was empty. Cleanup of build context directory can be done in except blocks or after this method returns.
 
     def cleanup_dockerfile_context(self, build_context_id: str):
         """Clean up a Dockerfile build context directory."""
         context_path = os.path.join(self.dockerfiles_dir, build_context_id)
         if os.path.exists(context_path):
             try:
-                shutil.rmtree(context_path)
+                # shutil.rmtree(context_path)
                 logger.info(f"Successfully cleaned up Dockerfile context: {context_path}")
             except OSError as e:
                 logger.error(f"Error cleaning up Dockerfile context {context_path}: {e.strerror}")

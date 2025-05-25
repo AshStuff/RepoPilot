@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     python3-venv \
     curl \
+    unzip \
     wget \
     build-essential \
     ca-certificates \
@@ -28,6 +29,8 @@ RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /
     && apt-get install -y docker-ce-cli \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Ollama installation and model pulling removed from base image
 
 # Create working directory
 WORKDIR /workspace

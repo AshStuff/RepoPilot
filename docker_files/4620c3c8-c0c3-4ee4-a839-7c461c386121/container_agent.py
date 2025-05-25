@@ -336,6 +336,7 @@ Example JSON output format:
     
     # Attempt to parse the LLM response as JSON
     try:
+        logger.info(f"container_agent.py: LLM response: {llm_response_raw}", file=sys.stderr)
         llm_response_json = json.loads(llm_response_raw)
         final_output["issue_summary"] = llm_response_json.get("issue_summary", "LLM did not provide an issue summary.")
         # Preserve the full LLM analysis under solution_analysis for more detail

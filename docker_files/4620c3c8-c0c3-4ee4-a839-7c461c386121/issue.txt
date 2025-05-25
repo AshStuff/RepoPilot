@@ -1,0 +1,8 @@
+## System info
+branch: v1.1
+
+## Description
+Accuracy is always 0 % .
+
+## how to run the code:
+python src/train.py
