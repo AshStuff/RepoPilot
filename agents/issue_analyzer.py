@@ -516,7 +516,7 @@ class IssueAnalyzer:
                 analysis.analysis_status = 'failed'
                 analysis.error_message = f"An unexpected error occurred: {str(e)}"
                 analysis.ended_at = datetime.utcnow()
-                analysis.save()
+                analysis.save() 
         finally:
             if image_tag_for_cleanup: 
                 try:
