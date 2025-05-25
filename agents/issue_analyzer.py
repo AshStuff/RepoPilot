@@ -527,7 +527,7 @@ class IssueAnalyzer:
                 except Exception as e_rmi:
                     self.logger.error(f"Error cleaning up image {image_tag_for_cleanup}: {e_rmi}")
             
-            if build_context_id_for_cleanup:
+            if build_context_id_for_cleanup: 
                 try:
                     self.logger.info(f"Cleaning up Dockerfile context {build_context_id_for_cleanup}...")
                     self.docker_manager.cleanup_dockerfile_context(build_context_id_for_cleanup)
