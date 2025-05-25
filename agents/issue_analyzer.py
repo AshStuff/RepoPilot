@@ -518,7 +518,7 @@ class IssueAnalyzer:
                 analysis.ended_at = datetime.utcnow()
                 analysis.save()
         finally:
-            if image_tag_for_cleanup:
+            if image_tag_for_cleanup: 
                 try:
                     self.logger.info(f"Cleaning up Docker image {image_tag_for_cleanup}...")
                     # Use a generic log callback or none for cleanup, as the specific analysis log callback might rely on analysis object state.
