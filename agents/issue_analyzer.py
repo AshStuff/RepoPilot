@@ -433,6 +433,11 @@ class IssueAnalyzer:
 
             container_name = f"repopilot-agent-run-{build_context_id[:8]}"
 
+            # Prepare GITHUB_TOKEN from host environment
+            host_github_token = os.environ.get('GITHUB_TOKEN')
+            if not host_github_token:
+                docker_log_callback("Warning: GITHUB_TOKEN not found in host environment. PR creation will likely fail.", "warning")
+
             run_cmd_args = [
                 "run", 
                 "-d",
@@ -440,7 +445,14 @@ class IssueAnalyzer:
                 "--name", container_name,
                 "-v", f"{host_ollama_models_path}:/root/.ollama:ro",
                 "-v", f"{analysis_results_host_dir}:/workspace/analysis_results",
+                # Pass necessary environment variables for PR creation
+                "-e", f"REPO_NAME={repository.name}",
+                "-e", f"ISSUE_NUMBER={issue_number}",
+                "-e", f"ISSUE_URL=https://github.com/{repository.name}/issues/{issue_number}"
             ]
+            
+            if host_github_token:
+                run_cmd_args.extend(["-e", f"GITHUB_TOKEN={host_github_token}"])
             
             # Add host.docker.internal mapping if OLLAMA_HOST is set to it (it is, in Dockerfile)
             # This is needed for the container to reach Ollama on the host if host.docker.internal is used.
@@ -507,7 +519,7 @@ class IssueAnalyzer:
                     docker_log_callback(f"Found analysis_output.json after {int(time.time() - wait_start_time)} seconds", "info")
                     analysis_completed = True
                     break
-                
+                    
                 elapsed_time = int(time.time() - wait_start_time)
                 logger.info(f"Waiting for analysis to complete... ({elapsed_time}s elapsed)")
                 # Only log at significant milestones (every 30 seconds) to reduce spam
@@ -643,13 +655,14 @@ class IssueAnalyzer:
 
                         if pr_url:
                             analysis.pr_url = pr_url
-                            docker_log_callback(f"Pull Request created: {pr_url}", "success")
+                            # Format the PR URL as a markdown link to be clickable
+                            docker_log_callback(f"**Pull Request created:** [View PR]({pr_url})", "success")
                         else:
                             docker_log_callback("No Pull Request URL found in analysis results.", "info")
 
-                        analysis.analysis_results = analysis_results
-                        analysis.analysis_status = 'completed'
-                        analysis.error_message = None
+                    analysis.analysis_results = analysis_results
+                    analysis.analysis_status = 'completed'
+                    analysis.error_message = None 
                         
                     # docker_log_callback(f"Successfully processed analysis_output.json from {output_json_path_host}", "success")
                     

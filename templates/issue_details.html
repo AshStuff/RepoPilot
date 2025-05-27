@@ -1047,7 +1047,13 @@
                         {% if analysis and analysis.aider_processing_time_seconds is not none %}
                             <div class="processing-time-section" style="margin-top: 20px; padding: 10px; background-color: #e8f0fe; border-radius: 4px;">
                                 <p style="margin: 0; color: #1967d2;">
-                                    <i class="fas fa-stopwatch"></i> Time from Issue to PR ready: <strong>{{ "%.2f"|format(analysis.aider_processing_time_seconds) }} seconds</strong>
+                                    <i class="fas fa-stopwatch"></i> Time from Issue to PR ready: 
+                                    <strong>
+                                        {% if analysis.processing_time_minutes > 0 %}
+                                            {{ analysis.processing_time_minutes }} minute{{ 's' if analysis.processing_time_minutes != 1 else '' }} 
+                                        {% endif %}
+                                        {{ "%.2f"|format(analysis.processing_time_seconds_remainder) }} seconds
+                                    </strong>
                                 </p>
                             </div>
                         {% endif %}
@@ -1056,7 +1062,7 @@
                         {% if analysis and analysis.git_changes and analysis.git_changes.has_changes %}
                             <div class="git-changes-section" style="margin-top: 20px;">
                                 <h3>Code Changes</h3>
-                                <p>{{ analysis.git_changes.summary }}</p>
+                                <p>{{ analysis.git_changes.summary|markdown|safe }}</p>
                                 
                                 <div class="git-changes-files" style="margin: 15px 0;">
                                     <strong>Modified Files ({{ analysis.git_changes.changed_files|length }}):</strong>
@@ -1067,9 +1073,16 @@
                                     </ul>
                                 </div>
                                 
-                                <button id="toggle-git-diff" class="git-diff-button" onclick="toggleGitDiff()">
-                                    📋 View Git Diff
-                                </button>
+                                <div class="action-buttons-container" style="display: flex; gap: 10px; align-items: center; margin-top: 15px; margin-bottom: 15px;">
+                                    <button id="toggle-git-diff" class="git-diff-button" onclick="toggleGitDiff()" style="margin: 0;">
+                                        📋 View Git Diff
+                                    </button>
+                                    {% if analysis and analysis.pr_url %}
+                                        <a href="{{ analysis.pr_url }}" target="_blank" class="git-diff-button" style="text-decoration: none; display: inline-flex; align-items: center; margin: 0;">
+                                            <i class="fab fa-github" style="margin-right: 8px;"></i> View Pull Request
+                                        </a>
+                                    {% endif %}
+                                </div>
                                 
                                 <div id="git-diff-container" class="git-diff-container" style="display: none;">
                                     <div class="git-diff-content">
@@ -1106,15 +1119,6 @@
                         <div class="markdown-content" id="summary-explanation" style="margin-top: 30px;">
                             {{ analysis.final_output|markdown|safe }}
                         </div>
-
-                        <!-- Link to GitHub PR -->
-                        {% if analysis and analysis.pr_url %}
-                            <div class="github-pr-link-section" style="margin-top: 30px;">
-                                <a href="{{ analysis.pr_url }}" target="_blank" class="git-diff-button" style="text-decoration: none; display: inline-flex; align-items: center;">
-                                    <i class="fab fa-github" style="margin-right: 8px;"></i> View Pull Request on GitHub
-                                </a>
-                            </div>
-                        {% endif %}
 
                     {% elif analysis and analysis.analysis_status == 'in_progress' %}
                         <p>Analysis is currently in progress. The summary will be available once it's complete.</p>

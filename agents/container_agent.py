@@ -317,7 +317,7 @@ After applying the fix, please briefly explain the changes you made and why. The
     logger.info(f"Aider LLM interaction completed in {aider_processing_time} seconds. Raw conversation length: {len(llm_conversation_raw)}")
     
     # Extract the explanation from the conversation
-    explanation_marker_match = re.search(r"(?:\\*\\*|##|#|)\\s*Explanation[:\\*\\*]*", llm_conversation_raw, re.IGNORECASE)
+    explanation_marker_match = re.search(r"(?:\*\*|#+|)\s*Explanation[:\*\*]*", llm_conversation_raw, re.IGNORECASE)
     explanation = "No explanation provided in the LLM response."
 
     if explanation_marker_match:
@@ -405,8 +405,9 @@ After applying the fix, please briefly explain the changes you made and why. The
                             logger.info(f"Creating new branch: {branch_name}")
                             # Create new branch from the current HEAD (which should be the repo's default branch or specified checkout)
                             # Assuming the repo is already on the correct base branch.
-                            source_branch = repo.head.reference
-                            new_branch = repo.create_head(branch_name, source_branch.commit)
+                            # Using repo.head.commit directly to support detached HEAD state.
+                            current_commit = repo.head.commit
+                            new_branch = repo.create_head(branch_name, current_commit)
                             new_branch.checkout()
                             
                             # Stage all changes (Aider should have handled what to change)
@@ -417,25 +418,42 @@ After applying the fix, please briefly explain the changes you made and why. The
                             logger.info(f"Committed changes to branch {branch_name}.")
                             
                             # Push the new branch
-                            # Need to set up remote if not already configured properly by clone
                             origin = repo.remote(name='origin')
-                            # Ensure origin URL has token for auth if HTTPS, or SSH keys are set up
-                            # This script assumes GH_TOKEN grants push rights for HTTPS URLs
-                            # If repo was cloned with SSH, SSH keys in container are needed
                             
-                            # Construct authenticated URL (safer than modifying existing remote URL in-place)
-                            # This expects repo_name_env to be in "owner/repo" format
-                            # And GITHUB_TOKEN to be an access token that can push
-                            repo_owner_slash_name = repo_name_env # "owner/repo"
-                            # origin_url_with_auth = f"https://x-access-token:{github_token}@github.com/{repo_owner_slash_name}.git"
-                            # repo.git.push(origin_url_with_auth, branch_name, set_upstream=True) 
-                            # Simpler: rely on git credential helper or SSH if set up in container
-                            origin.push(refspec=f'{branch_name}:{branch_name}', set_upstream=True)
+                            # Construct authenticated URL for push
+                            repo_owner_slash_name = repo_name_env # Expected format "owner/repo"
+                            authenticated_url = f"https://x-access-token:{github_token}@github.com/{repo_owner_slash_name}.git"
+                            
+                            logger.info(f"Pushing branch {branch_name} to authenticated URL...")
+                            # Push using the specific authenticated URL directly, creating the remote if it doesn't match
+                            # or use a temporary remote for the push operation.
+                            # For simplicity, we'll try to push to the specific URL.
+                            # This requires the GITHUB_TOKEN to have push permissions.
+                            try:
+                                repo.git.push(authenticated_url, f'{branch_name}:{branch_name}', set_upstream=True)
+                            except git.exc.GitCommandError as e_push:
+                                logger.error(f"Failed to push to {authenticated_url}. Error: {e_push.stderr}")
+                                # Fallback: Attempt to push to the existing origin remote. 
+                                # This might work if SSH keys are set up or a credential helper is already configured in the container.
+                                logger.info(f"Push to authenticated URL failed. Attempting push to existing origin remote: {origin.url}")
+                                try:
+                                    origin.push(refspec=f'{branch_name}:{branch_name}', set_upstream=True)
+                                except Exception as e_origin_push:
+                                    logger.error(f"Fallback push to origin also failed: {e_origin_push}")
+                                    raise e_origin_push # Re-raise the error if fallback also fails
 
                             logger.info(f"Pushed branch {branch_name} to origin.")
                             
-                            pr_title = f"Repopilot Fix: Issue #{issue_number_env} - {coder.get_aider_chat_history().splitlines()[-2][:50] if coder.get_aider_chat_history() else 'Automated Fix'}" # Example title
-                            pr_body = f"**Issue:** [{repo_name_env}#{issue_number_env}]({issue_url_env})\\n\\n**Explanation from Aider:**\\n\\n{explanation}"
+                            # Generate a PR title. Use a snippet of the issue title or a generic one if issue title is unavailable.
+                            issue_title_for_pr = "Automated Fix"
+                            if issue_content:
+                                first_line_of_issue = issue_content.splitlines()[0] if issue_content.splitlines() else ""
+                                issue_title_for_pr = first_line_of_issue[:70] # Take first 70 chars of issue's first line
+                                if not issue_title_for_pr:
+                                    issue_title_for_pr = "Automated Fix for Issue"
+
+                            pr_title = f"Repopilot Fix: Issue #{issue_number_env} - {issue_title_for_pr}"
+                            pr_body = f"**Issue:** [{repo_name_env}#{issue_number_env}]({issue_url_env})\n\n**Explanation from Aider:**\n\n{explanation}"
                             
                             # Determine base branch (repo's default branch)
                             base_branch_name = gh_repo.default_branch
@@ -448,7 +466,8 @@ After applying the fix, please briefly explain the changes you made and why. The
                                 base=base_branch_name 
                             )
                             git_changes["pr_url"] = pull_request.html_url
-                            git_changes["summary"] += f" Pull Request created: {pull_request.html_url}"
+                            # Format the summary to include a markdown link for the PR
+                            git_changes["summary"] += f" Pull Request created: [View PR]({pull_request.html_url})"
                             logger.info(f"Successfully created Pull Request: {pull_request.html_url}")
 
                         except Exception as e_pr:

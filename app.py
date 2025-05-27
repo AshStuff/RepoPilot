@@ -1320,7 +1320,7 @@ def issue_updates(repo_name, issue_number):
                 if 'user' not in session:
                     logger.warning(f"SSE: Session expired for {repo_name}/{issue_number}")
                     break
-                    
+                
                 # Fetch the IssueAnalysis object from MongoDB
                 analysis = IssueAnalysis.objects(repository=repository, issue_number=issue_number).first()
 
@@ -1518,12 +1518,23 @@ def issue_details(repo_name, issue_number):
         
         current_logs = analysis.logs if analysis and hasattr(analysis, 'logs') else []
         
+        # Prepare analysis data for template, including formatted time
+        analysis_data_for_template = None
+        if analysis:
+            analysis_data_for_template = analysis.to_dict()
+            if analysis.aider_processing_time_seconds is not None:
+                total_seconds = analysis.aider_processing_time_seconds
+                minutes = int(total_seconds // 60)
+                seconds = round(total_seconds % 60, 2)
+                analysis_data_for_template['processing_time_minutes'] = minutes
+                analysis_data_for_template['processing_time_seconds_remainder'] = seconds
+
         return render_template('issue_details.html', 
                               repository=repository, 
                               issue=issue_data, 
                               comments=comments, 
                               user=user,
-                              analysis=analysis, # Pass the definitive analysis object
+                              analysis=analysis_data_for_template, # Pass the prepared dict
                               logs=current_logs)
                               
     except Exception as e:
@@ -1800,4 +1811,6 @@ if __name__ == '__main__':
     atexit.register(cleanup_tasks)
     
     # Run the Flask app
-    app.run(debug=True, port=5001) 
+    # When debugging Docker interactions that modify files which might trigger the reloader,
+    # temporarily set use_reloader=False to prevent interruption of background tasks.
+    app.run(debug=True, port=5001, use_reloader=False) 
