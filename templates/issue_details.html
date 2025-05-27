@@ -863,6 +863,10 @@
                 <i class="fas fa-book"></i>
                 Repositories
             </a>
+            <a href="{{ url_for('review_pr') }}" class="nav-link">
+                <i class="fas fa-tasks"></i>
+                Review PR
+            </a>
             <a href="{{ url_for('settings') }}" class="nav-link">
                 <i class="fas fa-cog"></i>
                 Settings
@@ -897,7 +901,7 @@
                         {% if issue.labels %}
                         <div class="issue-labels">
                             {% for label in issue.labels %}
-                            <span class="issue-label" style="background-color: #{{ label.color }}20; color: #{{ label.color }};">
+                            <span class="issue-label">
                                 {{ label.name }}
                             </span>
                             {% endfor %}
@@ -1052,7 +1056,7 @@
                                         {% if analysis.processing_time_minutes > 0 %}
                                             {{ analysis.processing_time_minutes }} minute{{ 's' if analysis.processing_time_minutes != 1 else '' }} 
                                         {% endif %}
-                                        {{ "%.2f"|format(analysis.processing_time_seconds_remainder) }} seconds
+                                        {{ analysis.processing_time_seconds_remainder }} seconds
                                     </strong>
                                 </p>
                             </div>
@@ -1062,7 +1066,7 @@
                         {% if analysis and analysis.git_changes and analysis.git_changes.has_changes %}
                             <div class="git-changes-section" style="margin-top: 20px;">
                                 <h3>Code Changes</h3>
-                                <p>{{ analysis.git_changes.summary|markdown|safe }}</p>
+                                <p>{{ (analysis.git_changes.summary | default('', True)).replace("Pull Request created: View PR", "").strip() | markdown | safe }}</p>
                                 
                                 <div class="git-changes-files" style="margin: 15px 0;">
                                     <strong>Modified Files ({{ analysis.git_changes.changed_files|length }}):</strong>
@@ -1117,7 +1121,7 @@
 
                         <!-- Explanation Section -->
                         <div class="markdown-content" id="summary-explanation" style="margin-top: 30px;">
-                            {{ analysis.final_output|markdown|safe }}
+                            {{ (analysis.final_output | default('', True)).replace("Pull Request created: View PR", "").strip() | markdown | safe }}
                         </div>
 
                     {% elif analysis and analysis.analysis_status == 'in_progress' %}
@@ -1309,6 +1313,35 @@ document.addEventListener('DOMContentLoaded', function() {
         console.log('SSE setup disabled - using auto-refresh instead');
     }
     */
+});
+
+// Script to activate tab based on URL query parameter
+document.addEventListener('DOMContentLoaded', function() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const tabToOpen = urlParams.get('tab_to_open');
+
+    if (tabToOpen) {
+        // Deactivate all tabs first
+        document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(content => {
+            content.classList.remove('active');
+            content.style.display = 'none';
+        });
+
+        // Activate the target tab
+        const targetTabButton = document.querySelector(`.tab-button[data-tab="${tabToOpen}"]`);
+        const targetTabContent = document.getElementById(tabToOpen);
+
+        if (targetTabButton && targetTabContent) {
+            targetTabButton.classList.add('active');
+            targetTabContent.classList.add('active');
+            targetTabContent.style.display = 'block';
+            
+            console.log(`Switched to tab: ${tabToOpen} from URL parameter`);
+        } else {
+            console.warn(`Tab or content for "${tabToOpen}" not found.`);
+        }
+    }
 });
 </script>
 {% endblock %}

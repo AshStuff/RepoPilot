@@ -825,6 +825,57 @@ def settings():
     
     return render_template('settings.html', user=user_dict)
 
+@app.route('/review-pr')
+def review_pr():
+    if 'user' not in session:
+        return redirect(url_for('login'))
+
+    user = User.objects(id=session['user']['id']).first()
+    if not user:
+        flash("User not found, please log in again.", "error")
+        return redirect(url_for('login'))
+
+    connected_repo_ids = [repo.id for repo in ConnectedRepository.objects(user=user)]
+    
+    analyses_with_prs = IssueAnalysis.objects(
+        repository__in=connected_repo_ids,
+        analysis_status__in=['completed', 'analysis_complete'],
+        pr_url__exists=True,
+        pr_url__ne=""
+    ).order_by('-updated_at')
+
+    pr_list = []
+    for analysis in analyses_with_prs:
+        if analysis.repository:
+            time_to_pr_str = "N/A"
+            if analysis.aider_processing_time_seconds is not None:
+                total_seconds = analysis.aider_processing_time_seconds
+                minutes = int(total_seconds // 60)
+                seconds_remainder = int(round(total_seconds % 60)) # Round to nearest whole number
+                if minutes > 0:
+                    time_to_pr_str = f"{minutes} min {seconds_remainder} sec"
+                else:
+                    time_to_pr_str = f"{seconds_remainder} sec"
+            
+            summary = analysis.issue_summary # Prefer issue_summary
+            if not summary and analysis.final_output: # Fallback to final_output
+                summary = (analysis.final_output[:100] + '...') if len(analysis.final_output) > 100 else analysis.final_output
+            elif not summary:
+                summary = "No summary available."
+
+            pr_list.append({
+                'repo_name': analysis.repository.name,
+                'issue_number': analysis.issue_number,
+                'issue_description': analysis.issue_title or "No description provided.",
+                'summary': summary, # Add the summary here
+                'pr_url': analysis.pr_url,
+                'time_to_pr': time_to_pr_str
+            })
+        else:
+            logger.warning(f"IssueAnalysis record {analysis.id} has a null repository reference. Skipping.")
+
+    return render_template('review.html', user=session.get('user'), pr_list=pr_list)
+
 # Add before_request handler to log session state
 @app.before_request
 def before_request():
@@ -1525,9 +1576,9 @@ def issue_details(repo_name, issue_number):
             if analysis.aider_processing_time_seconds is not None:
                 total_seconds = analysis.aider_processing_time_seconds
                 minutes = int(total_seconds // 60)
-                seconds = round(total_seconds % 60, 2)
+                seconds_remainder = int(round(total_seconds % 60)) # Round to nearest whole number
                 analysis_data_for_template['processing_time_minutes'] = minutes
-                analysis_data_for_template['processing_time_seconds_remainder'] = seconds
+                analysis_data_for_template['processing_time_seconds_remainder'] = seconds_remainder
 
         return render_template('issue_details.html', 
                               repository=repository, 

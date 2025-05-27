@@ -763,9 +763,11 @@
                 <p>@{{ user.login }}</p>
             </div>
             <nav class="sidebar-nav">
-                <a href="#" class="nav-link active" data-tab="repositories">
-                    <i class="fas fa-book"></i>
-                    Repositories
+                <a href="{{ url_for('dashboard') }}" class="nav-link active">
+                    <i class="fas fa-book"></i> Repositories
+                </a>
+                <a href="{{ url_for('review_pr') }}" class="nav-link">
+                    <i class="fas fa-tasks"></i> Review PR
                 </a>
                 <a href="#" class="nav-link" data-tab="settings">
                     <i class="fas fa-cog"></i>
