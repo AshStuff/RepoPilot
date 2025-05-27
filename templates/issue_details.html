@@ -1107,6 +1107,15 @@
                             {{ analysis.final_output|markdown|safe }}
                         </div>
 
+                        <!-- Link to GitHub PR -->
+                        {% if analysis and analysis.pr_url %}
+                            <div class="github-pr-link-section" style="margin-top: 30px;">
+                                <a href="{{ analysis.pr_url }}" target="_blank" class="git-diff-button" style="text-decoration: none; display: inline-flex; align-items: center;">
+                                    <i class="fab fa-github" style="margin-right: 8px;"></i> View Pull Request on GitHub
+                                </a>
+                            </div>
+                        {% endif %}
+
                     {% elif analysis and analysis.analysis_status == 'in_progress' %}
                         <p>Analysis is currently in progress. The summary will be available once it's complete.</p>
                     {% elif analysis and analysis.analysis_status == 'pending' %}

@@ -98,6 +98,7 @@ class IssueAnalysis(Document):
     final_output = StringField() # For storing the primary textual output of the analysis for display
     git_changes = DictField()  # Store git diff information from container analysis
     aider_processing_time_seconds = FloatField() # Store Aider processing time
+    pr_url = StringField() # URL of the Pull Request created by the agent
     
     # New fields for structured LLM output
     issue_summary = StringField()
@@ -132,6 +133,7 @@ class IssueAnalysis(Document):
             'final_output': self.final_output,
             'git_changes': self.git_changes,
             'aider_processing_time_seconds': self.aider_processing_time_seconds,
+            'pr_url': self.pr_url,
             'issue_summary': self.issue_summary,
             'code_analysis_summary': self.code_analysis_summary,
             'proposed_solutions': self.proposed_solutions,

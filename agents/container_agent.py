@@ -12,6 +12,12 @@ try:
 except ImportError:
     GIT_AVAILABLE = False
 
+try:
+    from github import Github
+    PYGITHUB_AVAILABLE = True
+except ImportError:
+    PYGITHUB_AVAILABLE = False
+
 # --- BEGIN: Setup for logging ---
 ANALYSIS_RESULTS_DIR = '/workspace/analysis_results'
 # Ensure the target directory for logs exists
@@ -54,6 +60,9 @@ except ImportError as e_import:
 # If aider import failed, log it officially now that logger is up.
 if not AIDER_AVAILABLE:
     logger.warning("Aider components (Coder, Model, InputOutput) could not be imported. LLM analysis will be skipped.")
+
+if not PYGITHUB_AVAILABLE:
+    logger.warning("PyGithub could not be imported. Pull Request creation will be skipped.")
 
 # --- Directory and File Reading Tools (to be used by the LLM agent) ---
 def list_directory_contents(path='.'):
@@ -308,106 +317,180 @@ After applying the fix, please briefly explain the changes you made and why. The
     logger.info(f"Aider LLM interaction completed in {aider_processing_time} seconds. Raw conversation length: {len(llm_conversation_raw)}")
     
     # Extract the explanation from the conversation
-    explanation_marker_match = re.search(r"(?:\*\*|##|#|)\s*Explanation[:\*\*]*", llm_conversation_raw, re.IGNORECASE)
+    explanation_marker_match = re.search(r"(?:\\*\\*|##|#|)\\s*Explanation[:\\*\\*]*", llm_conversation_raw, re.IGNORECASE)
     explanation = "No explanation provided in the LLM response."
 
     if explanation_marker_match:
         explanation_start_offset = explanation_marker_match.end()
         explanation = llm_conversation_raw[explanation_start_offset:].strip()
-    # else: explanation remains the default message
     
-    # Git diff analysis - only run if LLM conversation occurred and git is available
-    git_changes = None
-    if llm_conversation_raw and GIT_AVAILABLE:
-        logger.info("LLM conversation completed. Analyzing git changes...")
-        try:
-            # Initialize git repo object
-            repo = git.Repo(repo_path)
-            
-            # Get status of changed files
-            changed_files = []
-            modified_files = [item.a_path for item in repo.index.diff(None)]  # Working directory vs index
-            staged_files = [item.a_path for item in repo.index.diff("HEAD")]  # Index vs HEAD
-            untracked_files = repo.untracked_files
-            
-            all_changed_files = list(set(modified_files + staged_files + untracked_files))
-            
-            if all_changed_files:
-                logger.info(f"Found {len(all_changed_files)} changed files: {all_changed_files}")
+    git_changes = {
+        "has_changes": False,
+        "changed_files": [],
+        "file_diffs": {},
+        "summary": "No file changes detected by Aider or git diff.",
+        "pr_url": None # Initialize pr_url
+    }
+    
+    if llm_conversation_raw: # Only proceed if Aider ran
+        if GIT_AVAILABLE:
+            logger.info("LLM conversation completed. Analyzing git changes...")
+            try:
+                repo = git.Repo(repo_path)
                 
-                # Get detailed diff for each changed file
-                file_diffs = {}
-                for file_path in all_changed_files:
-                    try:
-                        if file_path in untracked_files:
-                            # For new files, show the entire content as addition
-                            full_file_path = os.path.join(repo_path, file_path)
-                            if os.path.exists(full_file_path):
-                                with open(full_file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                                    content = f.read()
+                # Check for uncommitted changes first
+                if repo.is_dirty(untracked_files=True):
+                    logger.info("Uncommitted changes found by Aider.")
+                    
+                    changed_files_paths = [item.a_path for item in repo.index.diff(None)] + repo.untracked_files
+                    
+                    file_diffs = {}
+                    for file_path in changed_files_paths:
+                        try:
+                            if file_path in repo.untracked_files:
+                                full_file_path = os.path.join(repo_path, file_path)
+                                if os.path.exists(full_file_path):
+                                    with open(full_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                        content = f.read()
+                                    file_diffs[file_path] = {
+                                        "status": "new_file",
+                                        "diff": f"+++ {file_path}\\n" + "\\n".join([f"+{line}" for line in content.splitlines()])
+                                    }
+                            else:
+                                diff_text = repo.git.diff(file_path) # Diff against working tree
                                 file_diffs[file_path] = {
-                                    "status": "new_file",
-                                    "diff": f"+++ {file_path}\n" + "\n".join([f"+{line}" for line in content.splitlines()])
+                                    "status": "modified",
+                                    "diff": diff_text
                                 }
-                        else:
-                            # For modified files, get the actual diff
-                            diff_text = repo.git.diff('HEAD', file_path)
-                            if not diff_text:
-                                # If no diff with HEAD, try working directory diff
-                                diff_text = repo.git.diff(file_path)
-                            
+                        except Exception as e_diff:
+                            logger.warning(f"Could not get diff for file {file_path}: {str(e_diff)}")
                             file_diffs[file_path] = {
-                                "status": "modified",
-                                "diff": diff_text
+                                "status": "error",
+                                "diff": f"Error getting diff: {str(e_diff)}"
                             }
-                    except Exception as e_diff:
-                        logger.warning(f"Could not get diff for file {file_path}: {str(e_diff)}")
-                        file_diffs[file_path] = {
-                            "status": "error",
-                            "diff": f"Error getting diff: {str(e_diff)}"
-                        }
-                
-                git_changes = {
-                    "has_changes": True,
-                    "changed_files": all_changed_files,
-                    "file_diffs": file_diffs,
-                    "summary": f"Found {len(all_changed_files)} modified files"
-                }
-                logger.info(f"Git diff analysis completed. {len(file_diffs)} files processed.")
-            else:
-                git_changes = {
-                    "has_changes": False,
-                    "changed_files": [],
-                    "file_diffs": {},
-                    "summary": "No file changes detected"
-                }
-                logger.info("No git changes detected after LLM interaction.")
-                
-        except Exception as e_git:
-            logger.error(f"Error during git diff analysis: {str(e_git)}")
-            git_changes = {
-                "has_changes": False,
-                "error": f"Git analysis failed: {str(e_git)}",
-                "changed_files": [],
-                "file_diffs": {},
-                "summary": "Git diff analysis failed"
-            }
-    elif llm_conversation_raw and not GIT_AVAILABLE:
-        logger.warning("LLM conversation completed but gitpython not available for diff analysis.")
-        git_changes = {
-            "has_changes": False,
-            "error": "GitPython not available in container",
-            "changed_files": [],
-            "file_diffs": {},
-            "summary": "Git diff analysis unavailable"
-        }
-    else:
-        logger.info("No LLM conversation occurred, skipping git diff analysis.")
-    
-    # logger.debug(f"Aider raw conversation: {llm_conversation_raw}") # Potentially very long
-    
-    # Update final_output structure based on Aider's attempt to fix code
-    final_output["issue_summary"] = issue_content # Keep the original issue content
+
+                    git_changes["has_changes"] = True
+                    git_changes["changed_files"] = changed_files_paths
+                    git_changes["file_diffs"] = file_diffs
+                    git_changes["summary"] = f"Found {len(changed_files_paths)} files modified by Aider."
+                    logger.info(f"Git diff analysis completed. {len(file_diffs)} files processed.")
+
+                    # --- GitHub PR Creation ---
+                    github_token = os.environ.get('GITHUB_TOKEN')
+                    repo_name_env = os.environ.get('REPO_NAME') # e.g., "owner/repo"
+                    issue_number_env = os.environ.get('ISSUE_NUMBER')
+                    issue_url_env = os.environ.get('ISSUE_URL')
+
+
+                    if PYGITHUB_AVAILABLE and github_token and repo_name_env and issue_number_env and issue_url_env:
+                        logger.info(f"Attempting to create Pull Request for issue {issue_number_env} in repo {repo_name_env}.")
+                        try:
+                            g = Github(github_token)
+                            gh_repo = g.get_repo(repo_name_env)
+                            
+                            branch_name = f"repopilot-fix-issue-{issue_number_env}"
+                            
+                            # Check if branch already exists
+                            try:
+                                existing_branch = gh_repo.get_branch(branch_name)
+                                if existing_branch:
+                                    # Branch exists, append a short unique ID to make it new
+                                    # This is a simple way to avoid conflicts, more robust handling might be needed
+                                    # for very frequent runs on the same issue.
+                                    logger.warning(f"Branch {branch_name} already exists. Appending timestamp to branch name.")
+                                    branch_name = f"repopilot-fix-issue-{issue_number_env}-{int(time.time())}"
+                            except Exception: # Branch does not exist, which is good
+                                pass
+
+                            logger.info(f"Creating new branch: {branch_name}")
+                            # Create new branch from the current HEAD (which should be the repo's default branch or specified checkout)
+                            # Assuming the repo is already on the correct base branch.
+                            source_branch = repo.head.reference
+                            new_branch = repo.create_head(branch_name, source_branch.commit)
+                            new_branch.checkout()
+                            
+                            # Stage all changes (Aider should have handled what to change)
+                            repo.git.add(A=True)
+                            
+                            commit_message = f"Fix: Apply Aider's fix for issue #{issue_number_env}\\n\\nAddresses: {issue_url_env}"
+                            repo.index.commit(commit_message)
+                            logger.info(f"Committed changes to branch {branch_name}.")
+                            
+                            # Push the new branch
+                            # Need to set up remote if not already configured properly by clone
+                            origin = repo.remote(name='origin')
+                            # Ensure origin URL has token for auth if HTTPS, or SSH keys are set up
+                            # This script assumes GH_TOKEN grants push rights for HTTPS URLs
+                            # If repo was cloned with SSH, SSH keys in container are needed
+                            
+                            # Construct authenticated URL (safer than modifying existing remote URL in-place)
+                            # This expects repo_name_env to be in "owner/repo" format
+                            # And GITHUB_TOKEN to be an access token that can push
+                            repo_owner_slash_name = repo_name_env # "owner/repo"
+                            # origin_url_with_auth = f"https://x-access-token:{github_token}@github.com/{repo_owner_slash_name}.git"
+                            # repo.git.push(origin_url_with_auth, branch_name, set_upstream=True) 
+                            # Simpler: rely on git credential helper or SSH if set up in container
+                            origin.push(refspec=f'{branch_name}:{branch_name}', set_upstream=True)
+
+                            logger.info(f"Pushed branch {branch_name} to origin.")
+                            
+                            pr_title = f"Repopilot Fix: Issue #{issue_number_env} - {coder.get_aider_chat_history().splitlines()[-2][:50] if coder.get_aider_chat_history() else 'Automated Fix'}" # Example title
+                            pr_body = f"**Issue:** [{repo_name_env}#{issue_number_env}]({issue_url_env})\\n\\n**Explanation from Aider:**\\n\\n{explanation}"
+                            
+                            # Determine base branch (repo's default branch)
+                            base_branch_name = gh_repo.default_branch
+                            logger.info(f"Creating PR against base branch: {base_branch_name}")
+
+                            pull_request = gh_repo.create_pull(
+                                title=pr_title,
+                                body=pr_body,
+                                head=branch_name,
+                                base=base_branch_name 
+                            )
+                            git_changes["pr_url"] = pull_request.html_url
+                            git_changes["summary"] += f" Pull Request created: {pull_request.html_url}"
+                            logger.info(f"Successfully created Pull Request: {pull_request.html_url}")
+
+                        except Exception as e_pr:
+                            logger.error(f"Failed to create Pull Request: {str(e_pr)}", exc_info=True)
+                            git_changes["summary"] += " Failed to create Pull Request."
+                            git_changes["error"] = (git_changes.get("error", "") + f" PR creation failed: {str(e_pr)}").strip()
+                    elif not PYGITHUB_AVAILABLE:
+                        logger.warning("PyGithub not available. Skipping Pull Request creation.")
+                        git_changes["summary"] += " PR creation skipped (PyGithub not available)."
+                    elif not (github_token and repo_name_env and issue_number_env and issue_url_env):
+                        logger.warning("Missing GitHub token, repo name, issue number, or issue URL for PR creation. Skipping.")
+                        missing_vars = []
+                        if not github_token: missing_vars.append("GITHUB_TOKEN")
+                        if not repo_name_env: missing_vars.append("REPO_NAME")
+                        if not issue_number_env: missing_vars.append("ISSUE_NUMBER")
+                        if not issue_url_env: missing_vars.append("ISSUE_URL")
+                        details = f"Missing environment variables: {', '.join(missing_vars)}"
+                        git_changes["summary"] += f" PR creation skipped ({details})."
+                        git_changes["error"] = (git_changes.get("error", "") + f" PR creation skipped: {details}.").strip()
+
+                else: # No uncommitted changes
+                    logger.info("No uncommitted changes detected by Aider.")
+                    git_changes["summary"] = "No file changes detected by Aider that required commit."
+            
+            except git.InvalidGitRepositoryError:
+                logger.error(f"The path {repo_path} is not a valid Git repository. Skipping git diff and PR creation.")
+                git_changes["error"] = "Not a valid Git repository."
+                git_changes["summary"] = "Git analysis failed (not a repo)."
+            except Exception as e_git:
+                logger.error(f"Error during git operations or PR creation: {str(e_git)}", exc_info=True)
+                git_changes["error"] = (git_changes.get("error", "") + f" Git/PR Error: {str(e_git)}").strip()
+                git_changes["summary"] = "Git analysis or PR creation failed."
+        
+        elif not GIT_AVAILABLE:
+            logger.warning("GitPython not available. Skipping git diff analysis and PR creation.")
+            git_changes["error"] = "GitPython not available in container"
+            git_changes["summary"] = "Git diff analysis and PR creation unavailable."
+    else: # No LLM conversation
+        logger.info("No LLM conversation occurred, skipping git diff analysis and PR creation.")
+        git_changes["summary"] = "No LLM interaction, so no changes to report or PR."
+
+    final_output["issue_summary"] = issue_content
     final_output["solution_analysis"] = {
         "action_taken": "Aider LLM was instructed to identify and fix the bug based on the issue.",
         "aider_conversation_log": llm_conversation_raw,
@@ -416,9 +499,6 @@ After applying the fix, please briefly explain the changes you made and why. The
         "notes": "Aider attempts to modify files directly in the workspace. Check the /workspace/repo_name/ directory for changes.",
         "git_changes": git_changes
     }
-
-    # The old JSON parsing logic for LLM response is no longer needed as Aider's response is a conversation string and changes are file-based.
-    # The `llm_response_json` related try-except block and subsequent assignments are removed.
 
     # Write the final structured output to analysis_output.json
     try:

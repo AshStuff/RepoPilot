@@ -567,6 +567,15 @@ class IssueAnalyzer:
                         'aider_processing_time_seconds' in analysis_results['solution_analysis']):
                         aider_processing_time = analysis_results['solution_analysis']['aider_processing_time_seconds']
 
+                    pr_url = None # Initialize pr_url
+                    if (isinstance(analysis_results, dict) and
+                        'solution_analysis' in analysis_results and
+                        isinstance(analysis_results['solution_analysis'], dict) and
+                        'git_changes' in analysis_results['solution_analysis'] and
+                        isinstance(analysis_results['solution_analysis']['git_changes'], dict) and
+                        'pr_url' in analysis_results['solution_analysis']['git_changes']):
+                        pr_url = analysis_results['solution_analysis']['git_changes']['pr_url']
+
                     # Check if aider_conversation_log is empty or null
                     if not aider_conversation_log or (isinstance(aider_conversation_log, (list, str)) and len(aider_conversation_log) == 0):
                         docker_log_callback("Analysis failed: aider_conversation_log is empty or missing", "error")
@@ -631,6 +640,12 @@ class IssueAnalyzer:
                             docker_log_callback(f"Aider processing time: {aider_processing_time} seconds", "info")
                         else:
                             docker_log_callback("Aider processing time not available.", "warning")
+
+                        if pr_url:
+                            analysis.pr_url = pr_url
+                            docker_log_callback(f"Pull Request created: {pr_url}", "success")
+                        else:
+                            docker_log_callback("No Pull Request URL found in analysis results.", "info")
 
                         analysis.analysis_results = analysis_results
                         analysis.analysis_status = 'completed'
