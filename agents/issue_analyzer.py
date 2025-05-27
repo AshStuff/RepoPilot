@@ -552,6 +552,13 @@ class IssueAnalyzer:
                         'explanation' in analysis_results['solution_analysis']):
                         explanation = analysis_results['solution_analysis']['explanation']
 
+                    git_changes = None
+                    if (isinstance(analysis_results, dict) and
+                        'solution_analysis' in analysis_results and
+                        isinstance(analysis_results['solution_analysis'], dict) and
+                        'git_changes' in analysis_results['solution_analysis']):
+                        git_changes = analysis_results['solution_analysis']['git_changes']
+
                     # Check if aider_conversation_log is empty or null
                     if not aider_conversation_log or (isinstance(aider_conversation_log, (list, str)) and len(aider_conversation_log) == 0):
                         docker_log_callback("Analysis failed: aider_conversation_log is empty or missing", "error")
@@ -592,6 +599,24 @@ class IssueAnalyzer:
                         else:
                             docker_log_callback("No explanation found in analysis results.", "warning")
                             analysis.final_output = "No explanation provided by the LLM."
+
+                        # Store git changes information if available
+                        if git_changes:
+                            analysis.git_changes = git_changes
+                            if git_changes.get('has_changes', False):
+                                docker_log_callback("SUMMARY - GIT CHANGES", "success")
+                                docker_log_callback("=" * 80, "info")
+                                docker_log_callback(f"Git changes summary: {git_changes.get('summary', 'No summary available')}", "info")
+                                changed_files = git_changes.get('changed_files', [])
+                                if changed_files:
+                                    docker_log_callback(f"Modified files ({len(changed_files)}):", "info")
+                                    for file_path in changed_files:
+                                        docker_log_callback(f"  • {file_path}", "info")
+                                docker_log_callback("=" * 80, "info")
+                            else:
+                                docker_log_callback("No git changes detected after LLM analysis.", "info")
+                        else:
+                            docker_log_callback("Git changes information not available.", "warning")
 
                         analysis.analysis_results = analysis_results
                         analysis.analysis_status = 'completed'

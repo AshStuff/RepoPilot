@@ -96,6 +96,7 @@ class IssueAnalysis(Document):
                                          'llm_processing', 'processing_output', 'llm_output_error', 'llm_failed', 'analysis_complete'], default='pending')
     analysis_results = DictField()  # Store the complete analysis results (can be general LLM output)
     final_output = StringField() # For storing the primary textual output of the analysis for display
+    git_changes = DictField()  # Store git diff information from container analysis
     
     # New fields for structured LLM output
     issue_summary = StringField()
@@ -128,6 +129,7 @@ class IssueAnalysis(Document):
             'analysis_status': self.analysis_status,
             'analysis_results': self.analysis_results,
             'final_output': self.final_output,
+            'git_changes': self.git_changes,
             'issue_summary': self.issue_summary,
             'code_analysis_summary': self.code_analysis_summary,
             'proposed_solutions': self.proposed_solutions,

@@ -1,3 +1,4 @@
 ollama
 aider-chat
+gitpython
 # Add other specific dependencies of container_agent.py if any 

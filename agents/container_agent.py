@@ -5,6 +5,12 @@ import json
 import logging
 import re # Ensure re is imported
 
+try:
+    import git
+    GIT_AVAILABLE = True
+except ImportError:
+    GIT_AVAILABLE = False
+
 # --- BEGIN: Setup for logging ---
 ANALYSIS_RESULTS_DIR = '/workspace/analysis_results'
 # Ensure the target directory for logs exists
@@ -296,6 +302,7 @@ After applying the fix, please briefly explain the changes you made and why. The
 
     llm_conversation_raw = coder.run(prompt) # Aider's run method returns the conversation string
     logger.info(f"Aider LLM interaction completed. Raw conversation length: {len(llm_conversation_raw)}")
+    
     # Extract the explanation from the conversation
     explanation_marker_match = re.search(r"(?:\*\*|##|#|)\s*Explanation[:\*\*]*", llm_conversation_raw, re.IGNORECASE)
     explanation = "No explanation provided in the LLM response."
@@ -305,6 +312,94 @@ After applying the fix, please briefly explain the changes you made and why. The
         explanation = llm_conversation_raw[explanation_start_offset:].strip()
     # else: explanation remains the default message
     
+    # Git diff analysis - only run if LLM conversation occurred and git is available
+    git_changes = None
+    if llm_conversation_raw and GIT_AVAILABLE:
+        logger.info("LLM conversation completed. Analyzing git changes...")
+        try:
+            # Initialize git repo object
+            repo = git.Repo(repo_path)
+            
+            # Get status of changed files
+            changed_files = []
+            modified_files = [item.a_path for item in repo.index.diff(None)]  # Working directory vs index
+            staged_files = [item.a_path for item in repo.index.diff("HEAD")]  # Index vs HEAD
+            untracked_files = repo.untracked_files
+            
+            all_changed_files = list(set(modified_files + staged_files + untracked_files))
+            
+            if all_changed_files:
+                logger.info(f"Found {len(all_changed_files)} changed files: {all_changed_files}")
+                
+                # Get detailed diff for each changed file
+                file_diffs = {}
+                for file_path in all_changed_files:
+                    try:
+                        if file_path in untracked_files:
+                            # For new files, show the entire content as addition
+                            full_file_path = os.path.join(repo_path, file_path)
+                            if os.path.exists(full_file_path):
+                                with open(full_file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                    content = f.read()
+                                file_diffs[file_path] = {
+                                    "status": "new_file",
+                                    "diff": f"+++ {file_path}\n" + "\n".join([f"+{line}" for line in content.splitlines()])
+                                }
+                        else:
+                            # For modified files, get the actual diff
+                            diff_text = repo.git.diff('HEAD', file_path)
+                            if not diff_text:
+                                # If no diff with HEAD, try working directory diff
+                                diff_text = repo.git.diff(file_path)
+                            
+                            file_diffs[file_path] = {
+                                "status": "modified",
+                                "diff": diff_text
+                            }
+                    except Exception as e_diff:
+                        logger.warning(f"Could not get diff for file {file_path}: {str(e_diff)}")
+                        file_diffs[file_path] = {
+                            "status": "error",
+                            "diff": f"Error getting diff: {str(e_diff)}"
+                        }
+                
+                git_changes = {
+                    "has_changes": True,
+                    "changed_files": all_changed_files,
+                    "file_diffs": file_diffs,
+                    "summary": f"Found {len(all_changed_files)} modified files"
+                }
+                logger.info(f"Git diff analysis completed. {len(file_diffs)} files processed.")
+            else:
+                git_changes = {
+                    "has_changes": False,
+                    "changed_files": [],
+                    "file_diffs": {},
+                    "summary": "No file changes detected"
+                }
+                logger.info("No git changes detected after LLM interaction.")
+                
+        except Exception as e_git:
+            logger.error(f"Error during git diff analysis: {str(e_git)}")
+            git_changes = {
+                "has_changes": False,
+                "error": f"Git analysis failed: {str(e_git)}",
+                "changed_files": [],
+                "file_diffs": {},
+                "summary": "Git diff analysis failed"
+            }
+    elif llm_conversation_raw and not GIT_AVAILABLE:
+        logger.warning("LLM conversation completed but gitpython not available for diff analysis.")
+        git_changes = {
+            "has_changes": False,
+            "error": "GitPython not available in container",
+            "changed_files": [],
+            "file_diffs": {},
+            "summary": "Git diff analysis unavailable"
+        }
+    else:
+        logger.info("No LLM conversation occurred, skipping git diff analysis.")
+    
     # logger.debug(f"Aider raw conversation: {llm_conversation_raw}") # Potentially very long
     
     # Update final_output structure based on Aider's attempt to fix code
@@ -313,7 +408,8 @@ After applying the fix, please briefly explain the changes you made and why. The
         "action_taken": "Aider LLM was instructed to identify and fix the bug based on the issue.",
         "aider_conversation_log": llm_conversation_raw,
         "explanation": explanation,
-        "notes": "Aider attempts to modify files directly in the workspace. Check the /workspace/repo_name/ directory for changes."
+        "notes": "Aider attempts to modify files directly in the workspace. Check the /workspace/repo_name/ directory for changes.",
+        "git_changes": git_changes
     }
 
     # The old JSON parsing logic for LLM response is no longer needed as Aider's response is a conversation string and changes are file-based.

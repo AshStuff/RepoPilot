@@ -726,6 +726,126 @@
         color: #dc3545;
         font-weight: bold;
     }
+
+    /* Git diff visualization styles */
+    .git-changes-section {
+        background-color: #f8f9fa;
+        border: 1px solid #e1e4e8;
+        border-radius: 6px;
+        padding: 20px;
+        margin: 20px 0;
+    }
+
+    .git-diff-button {
+        background-color: #0366d6;
+        color: white;
+        border: none;
+        border-radius: 6px;
+        padding: 10px 20px;
+        cursor: pointer;
+        font-size: 14px;
+        margin: 15px 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+    }
+
+    .git-diff-button:hover {
+        background-color: #0256cc;
+    }
+
+    .git-diff-container {
+        background-color: #fff;
+        border: 1px solid #d1d5da;
+        border-radius: 6px;
+        margin-top: 15px;
+        max-height: 600px;
+        overflow-y: auto;
+    }
+
+    .file-diff {
+        border-bottom: 1px solid #e1e4e8;
+    }
+
+    .file-diff:last-child {
+        border-bottom: none;
+    }
+
+    .file-diff-header {
+        background-color: #fafbfc;
+        padding: 10px 15px;
+        border-bottom: 1px solid #e1e4e8;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        font-size: 14px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+
+    .file-status {
+        font-size: 12px;
+        padding: 2px 6px;
+        border-radius: 3px;
+        font-weight: 500;
+    }
+
+    .file-status.new_file {
+        background-color: #d4edda;
+        color: #155724;
+    }
+
+    .file-status.modified {
+        background-color: #fff3cd;
+        color: #856404;
+    }
+
+    .file-status.error {
+        background-color: #f8d7da;
+        color: #721c24;
+    }
+
+    .diff-content {
+        font-family: SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
+        font-size: 12px;
+        line-height: 1.45;
+        color: #24292e;
+        background-color: transparent;
+        border: 0;
+        padding: 0;
+        margin: 0;
+        white-space: pre;
+        word-wrap: normal;
+        tab-size: 8;
+    }
+
+    .diff-content code {
+        background-color: transparent;
+        border: 0;
+        display: inline;
+        line-height: inherit;
+        margin: 0;
+        max-width: auto;
+        overflow: visible;
+        padding: 10px;
+        word-wrap: normal;
+        display: block;
+    }
+
+    .no-changes-section,
+    .git-error-section {
+        background-color: #fff3cd;
+        border: 1px solid #ffeeba;
+        border-radius: 6px;
+        padding: 15px;
+        margin: 20px 0;
+        color: #856404;
+    }
+
+    .git-error-section {
+        background-color: #f8d7da;
+        border-color: #f5c6cb;
+        color: #721c24;
+    }
 </style>
 {% endblock %}
 
@@ -937,6 +1057,56 @@
                     {% else %}
                         <p>No summary available yet. The analysis may not have run or completed.</p>
                     {% endif %}
+                    
+                    <!-- Git Changes Section -->
+                    {% if analysis and analysis.git_changes and analysis.git_changes.has_changes %}
+                        <div class="git-changes-section" style="margin-top: 30px;">
+                            <h3>Code Changes</h3>
+                            <p>{{ analysis.git_changes.summary }}</p>
+                            
+                            <div class="git-changes-files" style="margin: 15px 0;">
+                                <strong>Modified Files ({{ analysis.git_changes.changed_files|length }}):</strong>
+                                <ul style="margin: 10px 0; padding-left: 20px;">
+                                    {% for file_path in analysis.git_changes.changed_files %}
+                                        <li style="margin: 5px 0; font-family: monospace;">{{ file_path }}</li>
+                                    {% endfor %}
+                                </ul>
+                            </div>
+                            
+                            <button id="toggle-git-diff" class="git-diff-button" onclick="toggleGitDiff()">
+                                📋 View Git Diff
+                            </button>
+                            
+                            <div id="git-diff-container" class="git-diff-container" style="display: none;">
+                                <div class="git-diff-content">
+                                    {% for file_path, file_info in analysis.git_changes.file_diffs.items() %}
+                                        <div class="file-diff" style="margin-bottom: 20px;">
+                                            <div class="file-diff-header">
+                                                <strong>{{ file_path }}</strong>
+                                                <span class="file-status {{ file_info.status }}">
+                                                    {% if file_info.status == 'new_file' %}(new file)
+                                                    {% elif file_info.status == 'modified' %}(modified)
+                                                    {% elif file_info.status == 'error' %}(error)
+                                                    {% endif %}
+                                                </span>
+                                            </div>
+                                            <pre class="diff-content"><code>{{ file_info.diff }}</code></pre>
+                                        </div>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                        </div>
+                    {% elif analysis and analysis.git_changes and not analysis.git_changes.has_changes %}
+                        <div class="no-changes-section" style="margin-top: 30px;">
+                            <h3>Code Changes</h3>
+                            <p>No file changes were detected after the analysis.</p>
+                        </div>
+                    {% elif analysis and analysis.git_changes and analysis.git_changes.error %}
+                        <div class="git-error-section" style="margin-top: 30px;">
+                            <h3>Code Changes</h3>
+                            <p><strong>Error:</strong> {{ analysis.git_changes.error }}</p>
+                        </div>
+                    {% endif %}
                 </div>
             </div>
         </div>
@@ -986,6 +1156,20 @@ marked.setOptions({
     breaks: true,
     gfm: true
 });
+
+// Git diff toggle function
+function toggleGitDiff() {
+    const container = document.getElementById('git-diff-container');
+    const button = document.getElementById('toggle-git-diff');
+    
+    if (container.style.display === 'none' || container.style.display === '') {
+        container.style.display = 'block';
+        button.innerHTML = '📋 Hide Git Diff';
+    } else {
+        container.style.display = 'none';
+        button.innerHTML = '📋 View Git Diff';
+    }
+}
 
 document.addEventListener('DOMContentLoaded', function() {
     console.log('DOM loaded, setting up auto-refresh...');
