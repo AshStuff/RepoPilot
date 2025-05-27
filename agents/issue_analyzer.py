@@ -335,12 +335,38 @@ class IssueAnalyzer:
                     self.logger.warning(f"[BuildLog {analysis_id[:8]} Stream: {stream_type}] {log_line} (Analysis object no longer found)")
                     return
 
+                # Validate that the analysis object has all required fields before proceeding
+                if not current_analysis.repository or not current_analysis.issue_number or not current_analysis.issue_id:
+                    self.logger.error(f"Analysis object {analysis_id} is missing required fields: repository={current_analysis.repository}, issue_number={current_analysis.issue_number}, issue_id={current_analysis.issue_id}")
+                    # Try to fix the object by reloading required data
+                    try:
+                        if not current_analysis.repository and repository:
+                            current_analysis.repository = repository
+                        if not current_analysis.issue_number and issue_number:
+                            current_analysis.issue_number = issue_number
+                        if not current_analysis.issue_id and issue_id_gh:
+                            current_analysis.issue_id = issue_id_gh
+                        
+                        # Try to save the fixed object
+                        current_analysis.save()
+                        self.logger.info(f"Successfully fixed missing required fields for analysis {analysis_id}")
+                    except Exception as fix_error:
+                        self.logger.error(f"Failed to fix analysis object {analysis_id}: {fix_error}. The original log message from Docker was: '{log_line}'")
+                        # Log to general server logs as fallback, since we couldn't save to the specific analysis object
+                        self.logger.info(f"[BuildLog {analysis_id[:8]} Stream: {stream_type}] {log_line} (Failed to save to analysis object after attempting fix due to: {fix_error})")
+                        return
+
                 # Determine log type for add_log based on stream_type
                 log_type_for_db = stream_type.lower()
                 if stream_type.lower() not in ["info", "error", "warning", "success", "debug"]:
                     log_type_for_db = "info" # Default if stream_type is stdout/stderr etc.
 
-                current_analysis.add_log(log_line, log_type_for_db)
+                try:
+                    current_analysis.add_log(log_line, log_type_for_db)
+                except Exception as log_error:
+                    self.logger.error(f"Failed to add log to analysis {analysis_id}: {log_error}")
+                    # Log to general logger as fallback
+                    self.logger.info(f"[BuildLog {analysis_id[:8]} Stream: {stream_type}] {log_line}")
                 
                 # Limit logs to prevent excessive growth (e.g., last 200 lines) - add_log does not handle this, so keep it here if needed after save by add_log
                 # This logic might be better placed within add_log or as a separate cleanup if add_log saves frequently.
@@ -409,9 +435,11 @@ class IssueAnalyzer:
 
             run_cmd_args = [
                 "run", 
+                "-d",
+                "--network", "llm-net",
                 "--name", container_name,
                 "-v", f"{host_ollama_models_path}:/root/.ollama:ro",
-                "-v", f"{analysis_results_host_dir}:/workspace/analysis_results"
+                "-v", f"{analysis_results_host_dir}:/workspace/analysis_results",
             ]
             
             # Add host.docker.internal mapping if OLLAMA_HOST is set to it (it is, in Dockerfile)
@@ -432,6 +460,7 @@ class IssueAnalyzer:
                     log_callback=docker_log_callback, 
                     check=False # check=False to handle non-zero exit codes manually
                 )
+                docker_log_callback(f"Process run result: {process_run_result}", "info")
                 if process_run_result.returncode != 0:
                     docker_log_callback(f"Container {container_name} exited with error code {process_run_result.returncode}. Stderr: {process_run_result.stderr}", "error")
                     analysis.analysis_status = 'failed'
@@ -458,18 +487,118 @@ class IssueAnalyzer:
 
             # --- End Docker Run ---
 
-            # Process results from the host filesystem
+            # Process results from the host filesystem with polling
             output_json_path_host = os.path.join(analysis_results_host_dir, "analysis_output.json")
             error_log_path_host = os.path.join(analysis_results_host_dir, "analysis_error.log")
 
-            if os.path.exists(output_json_path_host):
+            # Wait for analysis to complete with polling
+            max_wait_time = 600  # 10 minutes maximum wait time
+            poll_interval = 5    # Check every 5 seconds
+            wait_start_time = time.time()
+            
+            docker_log_callback("Waiting for analysis to complete. Container is still running...", "info")
+            
+            analysis_completed = False
+            last_milestone_logged = 0  # Track milestones for reduced logging
+            
+            while time.time() - wait_start_time < max_wait_time:
+                if os.path.exists(output_json_path_host):
+                    docker_log_callback(f"Found analysis_output.json after {int(time.time() - wait_start_time)} seconds", "info")
+                    analysis_completed = True
+                    break
+                
+                elapsed_time = int(time.time() - wait_start_time)
+                logger.info(f"Waiting for analysis to complete... ({elapsed_time}s elapsed)")
+                # Only log at significant milestones (every 30 seconds) to reduce spam
+                if elapsed_time > 0 and elapsed_time % 30 == 0 and elapsed_time != last_milestone_logged:
+                    docker_log_callback(f"Still waiting for analysis completion... ({elapsed_time}s elapsed)", "info")
+                    last_milestone_logged = elapsed_time
+                
+                await asyncio.sleep(poll_interval)
+            
+            if not analysis_completed:
+                docker_log_callback(f"Analysis did not complete within {max_wait_time} seconds. Timing out.", "error")
+                analysis.analysis_status = 'failed'
+                analysis.error_message = f"Analysis timed out after {max_wait_time} seconds"
+                
+                # Check for error log
+                if os.path.exists(error_log_path_host):
+                    try:
+                        with open(error_log_path_host, 'r') as f_err:
+                            error_log_content = f_err.read(2000)
+                        analysis.error_message += f" Error log found: {error_log_content}"
+                        docker_log_callback(f"Found error log content: {error_log_content[:200]}...", "info")
+                    except Exception as e_read_err:
+                        docker_log_callback(f"Could not read analysis_error.log: {e_read_err}", "warning")
+            else:
+                # Analysis output file exists, now check its contents
                 try:
                     with open(output_json_path_host, 'r') as f:
                         analysis_results = json.load(f)
-                    analysis.analysis_results = analysis_results
-                    analysis.analysis_status = 'completed'
-                    analysis.error_message = None 
-                    docker_log_callback(f"Successfully loaded analysis_output.json from {output_json_path_host}", "success")
+                    
+                    # Check for the specific key structure: solution_analysis.aider_conversation_log
+                    aider_conversation_log = None
+                    if (isinstance(analysis_results, dict) and 
+                        'solution_analysis' in analysis_results and 
+                        isinstance(analysis_results['solution_analysis'], dict) and
+                        'aider_conversation_log' in analysis_results['solution_analysis']):
+                        
+                        aider_conversation_log = analysis_results['solution_analysis']['aider_conversation_log']
+                    
+                    explanation = None
+                    if (isinstance(analysis_results, dict) and
+                        'solution_analysis' in analysis_results and
+                        isinstance(analysis_results['solution_analysis'], dict) and
+                        'explanation' in analysis_results['solution_analysis']):
+                        explanation = analysis_results['solution_analysis']['explanation']
+
+                    # Check if aider_conversation_log is empty or null
+                    if not aider_conversation_log or (isinstance(aider_conversation_log, (list, str)) and len(aider_conversation_log) == 0):
+                        docker_log_callback("Analysis failed: aider_conversation_log is empty or missing", "error")
+                        analysis.analysis_status = 'failed'
+                        analysis.error_message = "Analysis failed: No aider conversation log generated"
+                        analysis.analysis_results = analysis_results  # Still save the partial results
+                    else:
+                        # Success - aider_conversation_log has content
+                        docker_log_callback("Analysis completed successfully with aider conversation log", "success")
+                        
+                        # Pretty print the conversation log under SUMMARY section
+                        docker_log_callback("=" * 80, "info")
+                        docker_log_callback("SUMMARY", "success")
+                        docker_log_callback("=" * 80, "info")
+                        
+                        # Format and display the conversation log
+                        if isinstance(aider_conversation_log, list):
+                            for i, log_entry in enumerate(aider_conversation_log, 1):
+                                docker_log_callback(f"[{i}] {log_entry}", "info")
+                        elif isinstance(aider_conversation_log, str):
+                            # Split by lines for better readability
+                            for line in aider_conversation_log.split('\n'):
+                                if line.strip():
+                                    docker_log_callback(line, "info")
+                        else:
+                            docker_log_callback(f"Conversation log: {aider_conversation_log}", "info")
+                        
+                        docker_log_callback("=" * 80, "info")
+
+                        if explanation:
+                            docker_log_callback("SUMMARY - EXPLANATION", "success")
+                            docker_log_callback("=" * 80, "info")
+                            for line in explanation.split('\n'):
+                                if line.strip():
+                                    docker_log_callback(line, "info")
+                            docker_log_callback("=" * 80, "info")
+                            analysis.final_output = explanation # Store explanation in final_output
+                        else:
+                            docker_log_callback("No explanation found in analysis results.", "warning")
+                            analysis.final_output = "No explanation provided by the LLM."
+
+                        analysis.analysis_results = analysis_results
+                        analysis.analysis_status = 'completed'
+                        analysis.error_message = None
+                        
+                    # docker_log_callback(f"Successfully processed analysis_output.json from {output_json_path_host}", "success")
+                    
                 except json.JSONDecodeError as e:
                     self.logger.error(f"Failed to decode analysis_output.json for issue #{issue_number}: {e}")
                     docker_log_callback(f"Failed to decode analysis_output.json: {e}", "error")
@@ -480,23 +609,6 @@ class IssueAnalyzer:
                     docker_log_callback(f"Failed to read analysis_output.json: {e_read}", "error")
                     analysis.analysis_status = 'failed'
                     analysis.error_message = f"Failed to read analysis_output.json: {e_read}"
-
-            else: # analysis_output.json not found
-                docker_log_callback(f"analysis_output.json not found at {output_json_path_host}. Checking for error log.", "warning")
-                analysis.analysis_status = 'failed'
-                analysis.error_message = "Analysis script did not produce an output file (analysis_output.json)."
-                if os.path.exists(error_log_path_host):
-                    try:
-                        with open(error_log_path_host, 'r') as f_err:
-                            error_log_content = f_err.read(2000) # Read up to 2000 chars of the error log
-                        analysis.error_message += f" Error log found: {error_log_content}"
-                        docker_log_callback(f"Found error log content: {error_log_content[:200]}...", "info")
-                    except Exception as e_read_err:
-                        docker_log_callback(f"Could not read analysis_error.log: {e_read_err}", "warning")
-                        analysis.error_message += " Could not read error log file."
-                else:
-                    docker_log_callback(f"analysis_error.log also not found at {error_log_path_host}.", "warning")
-                    analysis.error_message += " No error log file found either."
             
             analysis.ended_at = datetime.utcnow()
             analysis.save()
@@ -572,7 +684,6 @@ class IssueAnalyzer:
             
             # Create repo URL from repo name
             repo_url = f"https://github.com/{repo_name}"
-            
             # Create Docker container with the repository and branch
             container = await self.docker_manager.create_container(
                 repo_url=repo_url,

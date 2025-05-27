@@ -1272,33 +1272,55 @@ def get_issue_data(repo_name, issue_number, access_token):
 
 @app.route('/api/issue-updates/<path:repo_name>/<int:issue_number>')
 def issue_updates(repo_name, issue_number):
+    logger.info(f"SSE: New connection request for {repo_name}/{issue_number}")
+    logger.info(f"SSE: Session contents: {list(session.keys())}")
+    logger.info(f"SSE: User in session: {'user' in session}")
+    
     if 'user' not in session:
+        logger.warning(f"SSE: Unauthorized access attempt for {repo_name}/{issue_number}")
         return 'Unauthorized', 401
     
     def generate():
-        # last_update = None # Keep for GitHub issue changes if desired, or remove
-        # last_comment_count = 0 # Keep for GitHub issue changes if desired, or remove
+        logger.info(f"SSE: Starting stream generator for {repo_name}/{issue_number}")
         last_analysis_state = {}
+        heartbeat_counter = 0
+        
+        # Send initial connection confirmation
+        initial_data = {'connected': True, 'timestamp': datetime.utcnow().isoformat()}
+        yield f"data: {json.dumps(initial_data, cls=CustomJSONEncoder)}\n\n"
+        logger.info(f"SSE: Sent initial connection confirmation for {repo_name}/{issue_number}")
+        
+        # Get user and repository info once at the start
+        try:
+            user_id = session['user']['id']
+            user = User.objects(id=user_id).first()
+            if not user:
+                logger.error(f"SSE: User {user_id} not found for {repo_name}/{issue_number}")
+                error_data = {'error': 'User not found', 'timestamp': datetime.utcnow().isoformat()}
+                yield f"data: {json.dumps(error_data, cls=CustomJSONEncoder)}\n\n"
+                return
+
+            repository = ConnectedRepository.objects(user=user, name=repo_name).first()
+            if not repository:
+                logger.error(f"SSE: Repository {repo_name} not found for user {user.login}")
+                error_data = {'error': f'Repository {repo_name} not found', 'timestamp': datetime.utcnow().isoformat()}
+                yield f"data: {json.dumps(error_data, cls=CustomJSONEncoder)}\n\n"
+                return
+            
+            logger.info(f"SSE: Successfully found user {user.login} and repository {repo_name}")
+        except Exception as e:
+            logger.error(f"SSE: Error getting user/repository info: {str(e)}")
+            error_data = {'error': f'Setup error: {str(e)}', 'timestamp': datetime.utcnow().isoformat()}
+            yield f"data: {json.dumps(error_data, cls=CustomJSONEncoder)}\n\n"
+            return
         
         while True:
-            if 'user' not in session:
-                break
-                
             try:
-                # Fetch the ConnectedRepository first to link to IssueAnalysis
-                user_id = session['user']['id']
-                user = User.objects(id=user_id).first()
-                if not user:
-                    logger.warning(f"SSE: User {user_id} not found in session for issue {repo_name}/{issue_number}")
-                    time.sleep(10) # Wait before retrying if user session is somehow lost
-                    continue
-
-                repository = ConnectedRepository.objects(user=user, name=repo_name).first()
-                if not repository:
-                    logger.warning(f"SSE: Repository {repo_name} not found for user {user.login} for issue {issue_number}")
-                    time.sleep(10) # Wait before retrying
-                    continue
-                
+                # Ensure user is still in session (session might expire)
+                if 'user' not in session:
+                    logger.warning(f"SSE: Session expired for {repo_name}/{issue_number}")
+                    break
+                    
                 # Fetch the IssueAnalysis object from MongoDB
                 analysis = IssueAnalysis.objects(repository=repository, issue_number=issue_number).first()
 
@@ -1308,48 +1330,89 @@ def issue_updates(repo_name, issue_number):
                         'id': str(analysis.id),
                         'analysis_status': analysis.analysis_status,
                         'logs_count': len(analysis.logs or []),
-                        # Potentially add a last_modified timestamp to IssueAnalysis model for more robust change detection
-                        # 'last_modified': analysis.last_modified.isoformat() if analysis.last_modified else None
+                        'updated_at': analysis.updated_at.isoformat() if hasattr(analysis, 'updated_at') and analysis.updated_at else None
                     }
+                    logger.debug(f"SSE: Current analysis state for {repo_name}/{issue_number}: {current_analysis_state}")
 
                 # Check if the analysis state has changed (status or log count)
-                # A more robust check might involve hashing the logs or using a dedicated updated_at field in IssueAnalysis
                 if current_analysis_state != last_analysis_state:
                     logger.info(f"SSE: Detected change in analysis for {repo_name}/{issue_number}. Status: {current_analysis_state.get('analysis_status')}, Logs: {current_analysis_state.get('logs_count')}")
                     update_data = {}
-                    if analysis: # Ensure analysis object exists before trying to convert to dict
+                    if analysis: 
                          # Send the whole analysis object, client-side already picks out .logs and .analysis_status
-                        update_data['analysis'] = analysis.to_dict() 
+                        analysis_dict = analysis.to_dict()
+                        update_data['analysis'] = analysis_dict
+                        update_data['timestamp'] = datetime.utcnow().isoformat()
+                        logger.debug(f"SSE: Sending analysis update with {len(analysis_dict.get('logs', []))} logs")
                     else:
-                        # If analysis is somehow null (e.g., deleted after last check but before this one)
-                        # Send an empty analysis or a specific signal to the client
-                        update_data['analysis'] = None # Or { 'analysis_status': 'not_found', 'logs': [] }
+                        # If analysis is null, send empty analysis
+                        update_data['analysis'] = None
+                        update_data['timestamp'] = datetime.utcnow().isoformat()
+                        logger.info(f"SSE: No analysis found for {repo_name}/{issue_number}, sending null analysis")
 
-                    # Optional: Still include GitHub issue data if needed by client for other purposes
-                    # access_token = session['user']['access_token']
-                    # issue_data_from_gh, _ = get_issue_data(repo_name, issue_number, access_token)
-                    # if issue_data_from_gh:
-                    #    update_data['issue'] = issue_data_from_gh
+                    try:
+                        data_json = json.dumps(update_data, cls=CustomJSONEncoder)
+                        yield f"data: {data_json}\n\n"
+                        logger.info(f"SSE: Successfully sent update for {repo_name}/{issue_number}")
+                    except Exception as json_error:
+                        logger.error(f"SSE: JSON encoding error for {repo_name}/{issue_number}: {str(json_error)}")
+                        # Send a simpler error message
+                        error_data = {'error': 'Data encoding error', 'timestamp': datetime.utcnow().isoformat()}
+                        yield f"data: {json.dumps(error_data)}\n\n"
                     
-                    yield f"data: {json.dumps(update_data, cls=CustomJSONEncoder)}\n\n"
                     last_analysis_state = current_analysis_state
                 
-                time.sleep(2)  # Poll every 2 seconds (adjust as needed)
+                # Send heartbeat every 10 iterations (20 seconds with 2-second sleep)
+                heartbeat_counter += 1
+                if heartbeat_counter >= 10:
+                    heartbeat_data = {
+                        'heartbeat': True,
+                        'timestamp': datetime.utcnow().isoformat(),
+                        'status': current_analysis_state.get('analysis_status', 'unknown')
+                    }
+                    try:
+                        yield f"data: {json.dumps(heartbeat_data, cls=CustomJSONEncoder)}\n\n"
+                        logger.debug(f"SSE: Sent heartbeat for {repo_name}/{issue_number}")
+                    except Exception as heartbeat_error:
+                        logger.error(f"SSE: Heartbeat send error for {repo_name}/{issue_number}: {str(heartbeat_error)}")
+                    heartbeat_counter = 0
+                
+                # Dynamic polling frequency based on analysis status
+                current_status = current_analysis_state.get('analysis_status', 'unknown')
+                if current_status in ['in_progress', 'pending']:
+                    # More frequent polling during active analysis
+                    time.sleep(1)  # Poll every 1 second during active analysis
+                elif current_status in ['completed', 'failed']:
+                    # Less frequent polling when analysis is done
+                    time.sleep(5)  # Poll every 5 seconds when completed/failed
+                else:
+                    # Default polling frequency
+                    time.sleep(2)  # Poll every 2 seconds (default)
                 
             except Exception as e:
-                logger.error(f"Error in SSE stream for {repo_name}/{issue_number}: {str(e)}")
+                logger.error(f"SSE: Error in stream loop for {repo_name}/{issue_number}: {str(e)}")
                 logger.error(traceback.format_exc())
                 # Send an error message to the client if possible, then wait before retrying
-                error_payload = json.dumps({"error": f"SSE stream error: {str(e)}"}, cls=CustomJSONEncoder)
-                yield f"data: {error_payload}\n\n"
+                try:
+                    error_payload = json.dumps({
+                        "error": f"SSE stream error: {str(e)}",
+                        "timestamp": datetime.utcnow().isoformat()
+                    }, cls=CustomJSONEncoder)
+                    yield f"data: {error_payload}\n\n"
+                except:
+                    pass  # If we can't even send the error, just continue
                 time.sleep(5) 
+        
+        logger.info(f"SSE: Stream ended for {repo_name}/{issue_number}")
     
     return Response(
         stream_with_context(generate()),
         mimetype='text/event-stream',
         headers={
             'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive'
+            'Connection': 'keep-alive',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Cache-Control'
         }
     )
 
@@ -1570,7 +1633,7 @@ def render_markdown(text):
         html,
         tags=allowed_tags,
         attributes=allowed_attrs,
-        strip=True
+        strip_comments=True
     )
     
     return clean_html

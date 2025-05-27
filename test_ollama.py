@@ -5,7 +5,7 @@ async def main():
     # Create an agent with a local Ollama model
     # Models must be pulled via Ollama CLI first: ollama pull MODEL_NAME
     agent = create_agent(
-        model='ollama-qwen2.5-coder',  # prefix with "ollama-" followed by model name
+        model='ollama-qwen2.5-coder:32b',  # prefix with "ollama-" followed by model name
         temperature=0.3  # optional temperature setting
     )
     

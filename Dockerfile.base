@@ -3,12 +3,9 @@ FROM ubuntu:20.04
 # Avoid prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Update and install essential packages
+# Update and install essential packages, including those needed for PPA and specific Python version
 RUN apt-get update && apt-get install -y \
     git \
-    python3 \
-    python3-pip \
-    python3-venv \
     curl \
     unzip \
     wget \
@@ -21,6 +18,31 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Add deadsnakes PPA for newer Python versions
+RUN add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update
+
+# Install Python 3.10, venv, dev, and python-is-python3
+# We'll install pip for 3.10 using ensurepip
+RUN apt-get install -y \
+    python3.10 \
+    python3.10-venv \
+    python3.10-dev \
+    python-is-python3 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install pip for Python 3.10 using ensurepip and upgrade it
+RUN python3.10 -m ensurepip --upgrade \
+    && python3.10 -m pip install --upgrade pip setuptools wheel
+
+# Update alternatives to make python3 point to python3.10
+# And pip3 to the pip installed for python3.10. python will point to python3 via python-is-python3
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 \
+    && update-alternatives --install /usr/bin/pip3 pip3 /usr/local/bin/pip3.10 1 # ensurepip might place it in /usr/local/bin
+    # As a fallback or primary, pip itself might be available directly if ensurepip places it in python3.10's script dir that gets added to PATH
+    # Or, directly use python3.10 -m pip for subsequent pip commands if pip3 symlink is tricky.
+
 # Install Docker client
 RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
@@ -29,6 +51,9 @@ RUN curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /
     && apt-get install -y docker-ce-cli \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+# Aider installation via script REMOVED. We will use pip install as repopilot user.
+# RUN wget -qO- https://aider.chat/install.sh | sh 
 
 # Ollama installation and model pulling removed from base image
 
@@ -41,16 +66,25 @@ RUN groupadd -g 1000 repopilot && \
     chown -R repopilot:repopilot /workspace
 
 # Set environment variables
-ENV PATH="/home/repopilot/.local/bin:${PATH}"
+# Added /usr/local/bin to PATH just in case for pip
+ENV PATH="/home/repopilot/.local/bin:/usr/local/bin:${PATH}"
 ENV PYTHONPATH="/workspace:${PYTHONPATH}"
 ENV PYTHONUNBUFFERED=1
 
 # Switch to non-root user
 USER repopilot
 
-# Install Python dependencies
+# Install Python dependencies including aider-chat for the repopilot user
+# This will use the default pip3 which should now be python3.10's pip
 RUN pip3 install --upgrade pip && \
-    pip3 install setuptools wheel
+    pip3 install --user setuptools wheel aider-chat
+
+# The python-is-python3 package should have already created the necessary symlink for 'python' to point to 'python3' (which now points to python3.10).
+# The explicit symlink creation below is likely redundant and could fail if the link already exists.
+# RUN ln -s /usr/bin/python3 /usr/bin/python 
 
 # Default command
-CMD ["/bin/bash"] 
+CMD ["/bin/bash"]
+
+# Temporary alias for interactive sessions (good for user convenience, though python-is-python3 should make 'python' available)
+RUN echo "alias python=python3" >> /home/repopilot/.bashrc 

@@ -708,31 +708,6 @@
         border: 1px solid #e1e4e8;
     }
 
-    /* Style for mini buttons in terminal header - These are no longer used but kept for reference */
-    /*
-    .mini-button {
-        background-color: #333;
-        color: #ccc;
-        border: 1px solid #444;
-        border-radius: 4px;
-        padding: 4px 8px;
-        font-size: 12px;
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        gap: 4px;
-    }
-    
-    .mini-button:hover {
-        background-color: #444;
-        color: #fff;
-    }
-    
-    .mini-button i {
-        font-size: 10px;
-    }
-    */
-
     /* Add status indicator styles */
     .status-indicator {
         display: flex;
@@ -946,7 +921,22 @@
                 <!-- Summary Tab Content -->
                 <div id="summary" class="tab-content" style="display: none;">
                     <h2>Summary</h2>
-                    <p>Issue summary and analytics will be displayed here.</p>
+                    {% if analysis and analysis.final_output %}
+                        <div class="markdown-content" id="summary-explanation">
+                            {{ analysis.final_output|markdown|safe }}
+                        </div>
+                    {% elif analysis and analysis.analysis_status == 'in_progress' %}
+                        <p>Analysis is currently in progress. The summary will be available once it's complete.</p>
+                    {% elif analysis and analysis.analysis_status == 'pending' %}
+                        <p>Analysis is pending. The summary will be available once it starts and completes.</p>
+                    {% elif analysis and analysis.analysis_status == 'failed' %}
+                        <p>Analysis failed. No summary could be generated. Please check the workspace logs for more details.</p>
+                        {% if analysis.error_message %}
+                            <p><strong>Error:</strong> {{ analysis.error_message }}</p>
+                        {% endif %}
+                    {% else %}
+                        <p>No summary available yet. The analysis may not have run or completed.</p>
+                    {% endif %}
                 </div>
             </div>
         </div>
@@ -973,6 +963,18 @@
 <script src="{{ url_for('static', filename='js/tab-switcher.js') }}"></script>
 <script src="{{ url_for('static', filename='js/direct-tab-fix.js') }}"></script>
 
+<!-- Temporarily disable conflicting log polling scripts to prevent conflicts with SSE -->
+<!-- 
+<script src="{{ url_for('static', filename='js/force-logs.js') }}"></script>
+<script src="{{ url_for('static', filename='js/auto-logs.js') }}"></script>
+<script src="{{ url_for('static', filename='js/scripts.js') }}"></script>
+<script src="{{ url_for('static', filename='js/terminal-fix.js') }}"></script>
+<script src="{{ url_for('static', filename='js/direct-analyzer-logs.js') }}"></script>
+<script src="{{ url_for('static', filename='js/terminal-functions.js') }}"></script>
+<script src="{{ url_for('static', filename='js/onetime-fix.js') }}"></script>
+<script src="{{ url_for('static', filename='js/log-debugger.js') }}"></script>
+-->
+
 <!-- Add marked.js for client-side markdown rendering -->
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script>
@@ -986,147 +988,118 @@ marked.setOptions({
 });
 
 document.addEventListener('DOMContentLoaded', function() {
-    // Event listeners for clearAnalysisBtn, cleanupContainersBtn, and clearLogsBtn were removed.
+    console.log('DOM loaded, setting up auto-refresh...');
 
-    // SSE setup for logs
+    // Simple auto-refresh fallback - reload page every 10 seconds
+    let autoRefreshInterval;
+    let refreshEnabled = true;
+    
+    function startAutoRefresh() {
+        if (refreshEnabled) {
+            console.log('🔄 Starting auto-refresh every 10 seconds');
+            autoRefreshInterval = setInterval(function() {
+                console.log('🔄 Auto-refreshing page...');
+                // Only refresh if we're still on the workspace tab or if there's activity
+                const workspaceTab = document.getElementById('workspace');
+                if (workspaceTab && workspaceTab.style.display !== 'none') {
+                    window.location.reload();
+                }
+            }, 10000); // Refresh every 10 seconds
+        }
+    }
+    
+    function stopAutoRefresh() {
+        if (autoRefreshInterval) {
+            console.log('⏹️ Stopping auto-refresh');
+            clearInterval(autoRefreshInterval);
+            autoRefreshInterval = null;
+        }
+    }
+
+    // Add a visual indicator for auto-refresh
+    const terminalContent = document.getElementById('terminalContent');
+    if (terminalContent) {
+        const refreshIndicator = document.createElement('div');
+        refreshIndicator.style.cssText = `
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.7);
+            color: #fff;
+            padding: 5px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            z-index: 1000;
+        `;
+        refreshIndicator.innerHTML = '🔄 Auto-refresh: ON (10s)';
+        refreshIndicator.id = 'refresh-indicator';
+        
+        // Make terminal container position relative
+        const terminalContainer = terminalContent.closest('.terminal-container');
+        if (terminalContainer) {
+            terminalContainer.style.position = 'relative';
+            terminalContainer.appendChild(refreshIndicator);
+        }
+    }
+
+    // Stop refresh when user switches away from workspace tab
+    const tabButtons = document.querySelectorAll('.tab-button');
+    tabButtons.forEach(button => {
+        button.addEventListener('click', function() {
+            const tabName = this.getAttribute('data-tab');
+            if (tabName === 'workspace') {
+                console.log('🔄 Workspace tab activated - starting auto-refresh');
+                startAutoRefresh();
+                const indicator = document.getElementById('refresh-indicator');
+                if (indicator) indicator.style.display = 'block';
+            } else {
+                console.log('⏹️ Other tab activated - stopping auto-refresh');
+                stopAutoRefresh();
+                const indicator = document.getElementById('refresh-indicator');
+                if (indicator) indicator.style.display = 'none';
+            }
+        });
+    });
+
+    // Check which tab is initially active
+    const activeTab = document.querySelector('.tab-content.active');
+    if (activeTab && activeTab.id === 'workspace') {
+        console.log('🔄 Starting on workspace tab - enabling auto-refresh');
+        startAutoRefresh();
+    }
+
+    // Stop refresh when user navigates away
+    window.addEventListener('beforeunload', function() {
+        stopAutoRefresh();
+    });
+
+    // Pause refresh when page is not visible (user switched tabs/windows)
+    document.addEventListener('visibilitychange', function() {
+        if (document.hidden) {
+            console.log('👁️ Page hidden - pausing auto-refresh');
+            stopAutoRefresh();
+        } else {
+            console.log('👁️ Page visible - resuming auto-refresh');
+            const workspaceTab = document.getElementById('workspace');
+            if (workspaceTab && workspaceTab.style.display !== 'none') {
+                startAutoRefresh();
+            }
+        }
+    });
+
+    /* 
+    // DISABLED: Complex SSE implementation - keeping for reference
+    // The SSE setup code is disabled since it's not working properly
+    // If you want to re-enable it later, uncomment this section
+    
     const repoNameElement = document.querySelector('meta[name="repository-name"]');
     const issueNumberElement = document.querySelector('meta[name="issue-number"]');
 
     if (repoNameElement && issueNumberElement) {
-        const repoName = repoNameElement.content;
-        const issueNumber = issueNumberElement.content;
-        const terminalContent = document.getElementById('terminalContent');
-        const loadingSpinner = document.getElementById('loading-spinner');
-        const successIndicator = document.getElementById('success-indicator');
-        const errorIndicator = document.getElementById('error-indicator');
-
-        let eventSource = null;
-        let displayedLogMessages = new Set(); // To track displayed messages
-
-        function connectSSE() {
-            eventSource = new EventSource(`/api/issue-updates/${repoName}/${issueNumber}`);
-            showLoading();
-
-            eventSource.onmessage = function(event) {
-                const data = JSON.parse(event.data);
-                
-                if (data.error) {
-                    console.error("SSE Error:", data.error);
-                    appendLog(data.error, 'error', new Date().toISOString());
-                    showError();
-                    eventSource.close(); 
-                    return;
-                }
-
-                if (data.analysis && data.analysis.logs) {
-                    data.analysis.logs.forEach(log => {
-                        const logKey = `${log.timestamp}-${log.message}`;
-                        if (!displayedLogMessages.has(logKey)) {
-                            appendLog(log.message, log.type || 'info', log.timestamp);
-                            displayedLogMessages.add(logKey);
-                        }
-                    });
-                }
-
-                if (data.analysis) {
-                    updateStatusIndicators(data.analysis.analysis_status);
-                    if (data.analysis.analysis_status === 'completed' || data.analysis.analysis_status === 'failed' || data.analysis.analysis_status === 'pending_user_input') {
-                        hideLoading();
-                        if (data.analysis.analysis_status === 'completed') showSuccess();
-                        if (data.analysis.analysis_status === 'failed') showError();
-                    } else if (data.analysis.analysis_status === 'in_progress' || data.analysis.analysis_status === 'processing') {
-                        showLoading();
-                    } else {
-                        hideLoading(); 
-                    }
-                }
-            };
-
-            eventSource.onerror = function(err) {
-                console.error("EventSource failed:", err);
-                appendLog("Log stream connection error. Will attempt to reconnect shortly.", "error", new Date().toISOString());
-                showError();
-                eventSource.close();
-                setTimeout(connectSSE, 5000); 
-            };
-        }
-        
-        function appendLog(message, type, timestamp) {
-            if (!terminalContent) return;
-            const logEntry = document.createElement('div');
-            logEntry.className = 'log-entry';
-
-            const time = new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-            const timestampSpan = document.createElement('span');
-            timestampSpan.className = 'log-timestamp';
-            timestampSpan.textContent = time;
-
-            const messageSpan = document.createElement('span');
-            messageSpan.className = `log-message ${type.toLowerCase()}`;
-            
-            if (message.includes('```') || message.includes('###') || message.includes('**')) {
-                messageSpan.innerHTML = marked.parse(message); 
-                messageSpan.classList.add('markdown-formatted');
-            } else {
-                messageSpan.textContent = message;
-            }
-
-            logEntry.appendChild(timestampSpan);
-            logEntry.appendChild(messageSpan);
-            terminalContent.appendChild(logEntry);
-            terminalContent.scrollTop = terminalContent.scrollHeight; 
-        }
-
-        function showLoading() {
-            if(loadingSpinner) loadingSpinner.classList.remove('hidden');
-            if(successIndicator) successIndicator.classList.add('hidden');
-            if(errorIndicator) errorIndicator.classList.add('hidden');
-        }
-
-        function hideLoading() {
-            if(loadingSpinner) loadingSpinner.classList.add('hidden');
-        }
-
-        function showSuccess() {
-            if(loadingSpinner) loadingSpinner.classList.add('hidden');
-            if(successIndicator) successIndicator.classList.remove('hidden');
-            if(errorIndicator) errorIndicator.classList.add('hidden');
-        }
-
-        function showError() {
-            if(loadingSpinner) loadingSpinner.classList.add('hidden');
-            if(successIndicator) successIndicator.classList.add('hidden');
-            if(errorIndicator) errorIndicator.classList.remove('hidden');
-        }
-
-        function updateStatusIndicators(status) {
-            if (!status) return;
-            switch(status.toLowerCase()) {
-                case 'completed':
-                    showSuccess();
-                    break;
-                case 'failed':
-                case 'error_reproduced': 
-                    showError();
-                    break;
-                case 'in_progress':
-                case 'processing':
-                case 'pending':
-                case 'container_created': 
-                    showLoading();
-                    break;
-                case 'pending_user_input':
-                    hideLoading(); 
-                    break;
-                default:
-                    hideLoading(); 
-                    break;
-            }
-        }
-        connectSSE();
-    } else {
-        console.warn('Repository metadata not found for SSE connection.');
+        // SSE code would go here...
+        console.log('SSE setup disabled - using auto-refresh instead');
     }
+    */
 });
 </script>
 {% endblock %}

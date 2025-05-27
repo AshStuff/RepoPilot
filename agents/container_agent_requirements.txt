@@ -1,3 +1,3 @@
-cursor-agent-tools
 ollama
+aider-chat
 # Add other specific dependencies of container_agent.py if any 

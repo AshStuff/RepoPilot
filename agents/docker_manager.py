@@ -170,14 +170,19 @@ class DockerManager:
             process = self._run_docker_command(build_cmd, capture_output=True, text=True, check=True)
             
             logger.info(f"Creating container {container_name} for issue #{issue_number} in {repo_name} on branch {branch}")
-            
+            host_analysis_results_dir = os.path.join(self.dockerfiles_dir, container_id, "analysis_results")
+            # Create the directory and set permissions
+            os.makedirs(host_analysis_results_dir, exist_ok=True)
+            os.chmod(host_analysis_results_dir, 0o777)  # Set full permissions
+            logger.info(f"Mounting host analysis results directory: {host_analysis_results_dir}")
             run_cmd = [
                 "run", "-d",
+                "--network", "llm-net",
                 "--name", container_name,
+                "-v", f"{host_analysis_results_dir}:/workspace/analysis_results",
                 "-e", f"REPO_URL={repo_url}",
                 "-e", f"ISSUE_NUMBER={issue_number}",
                 "-e", f"BRANCH={branch}",
-                "-p", "11434:11434",
                 custom_image_name,
                 "/bin/bash", "-c", "tail -f /dev/null"
             ]
@@ -422,51 +427,48 @@ ENV REPO_URL=$REPO_URL
 ENV BRANCH=$BRANCH
 ENV ACCESS_TOKEN=$ACCESS_TOKEN
 ENV DEBIAN_FRONTEND=noninteractive
-# Point to Ollama server on the host machine
-ENV OLLAMA_HOST=host.docker.internal:11434
+# Point to Ollama server in the llm-net network
+ENV OLLAMA_HOST=my-ollama:11434
+ENV OLLAMA_API_BASE=http://my-ollama:11434
 ENV REPO_BASENAME={repo_basename}
 
-# Copy the clone script (from build context) into the image
-# Permissions should be preserved from the host if host script is executable.
-COPY clone_repo.sh /app/clone_repo.sh
-# RUN chmod +x /app/clone_repo.sh # Removed as per user request, host chmod should suffice
+# Install curl and then Aider using its official script
+RUN wget -qO- https://aider.chat/install.sh | sh
 
-# --- BEGIN ADDITION FOR issue.txt ---
-# Copy issue.txt into the image if it was created
-{issue_txt_copy_instruction}
-# --- END ADDITION FOR issue.txt ---
 
-# Copy the container agent script and its requirements
+# Setup app directory and copy necessary files
+WORKDIR /app
 COPY container_agent.py /app/container_agent.py
 COPY container_agent_requirements.txt /app/container_agent_requirements.txt
+{issue_txt_copy_instruction}
 
-# Install dependencies for the container agent
+# Install Python dependencies for the agent (e.g., ollama)
+# Aider is installed above via script, ensure container_agent_requirements.txt reflects this (e.g., no aider-chat pip install)
 RUN pip install --no-cache-dir -r /app/container_agent_requirements.txt
 
-# Run the clone script
+# Copy and run the script to clone the repository and install its specific dependencies
+COPY clone_repo.sh /app/clone_repo.sh
+# RUN chmod +x /usr/local/bin/clone_repo.sh
+# Run the clone script. It handles cloning, checkout, and installing repo-specific dependencies.
+# It will exit with non-zero if cloning fails, stopping the build.
 RUN /app/clone_repo.sh
 
-# Ollama setup (serve, pull) is removed from here,
-# as we are now expecting to connect to Ollama on the host.
-
-# Execute the container agent script and save its output and errors
-# RUN echo \"Executing container_agent.py...\" && \\
-#     (python3 /app/container_agent.py > /workspace/analysis_results/analysis_output.json 2> /workspace/analysis_results/analysis_error.log || touch /workspace/analysis_results/agent_failed_but_run_completed) && \\
-#     echo \"Container agent execution attempt finished.\"
-
-# Set working directory to the cloned repo
-WORKDIR /workspace/{repo_basename}
-
-# Default command (can be overridden)
-# CMD [\"/bin/bash\"] # CMD will be overridden by ENTRYPOINT or used as args to ENTRYPOINT if not executable form
-
+# Set the entrypoint for the container (can be overridden)
+# The container_agent.py will be executed when the container runs with this entrypoint.
 ENTRYPOINT ["python3", "/app/container_agent.py"]
+
+# Default command (useful if entrypoint is just python3, or for interactive use)
+# CMD ["/app/container_agent.py"]
+
+# For development, keep the container running
+CMD ["tail", "-f", "/dev/null"]
 """
         
+        logger.info(f"Dockerfile created at: {dockerfile_path}")
+        # logger.debug(f"Dockerfile content:\n{dockerfile_content}") # Can be very verbose
+
         with open(dockerfile_path, 'w') as f:
             f.write(dockerfile_content)
-            
-        logger.info(f"Dockerfile and clone script created in: {build_context_dir}")
         
         return dockerfile_path
     
@@ -695,7 +697,6 @@ ENTRYPOINT ["python3", "/app/container_agent.py"]
             
             # Create a custom Dockerfile for debugging
             dockerfile_path = self._create_custom_dockerfile(debug_id, repo_url, repo_name)
-            
             # Build custom image for debugging
             custom_image_name = f"repopilot-debug-{debug_id}"
             logger.info(f"Building debug Docker image for {repo_name}")
@@ -829,26 +830,34 @@ ENTRYPOINT ["python3", "/app/container_agent.py"]
                  logger.debug("No temporary container ID or name was set, skipping cleanup.")
                  if log_callback: log_callback("Skipped temp container cleanup as no ID/name was available.", "debug")
 
-    def clone_repo_and_create_image(self, repo_url, repo_name, issue_number, issue_body, branch_name=None, log_callback: Optional[Callable[[str, str], None]] = None):
+    def clone_repo_and_create_image(self, repo_url, repo_name, issue_number, issue_body, branch_name=None, access_token=None, log_callback: Optional[Callable[[str, str], None]] = None):
+        """
+        Clone a repository and create a Docker image for it.
+        Returns a tuple of (image_id_or_tag, build_context_id, build_logs_list, repo_dir)
+        """
         build_context_id = str(uuid.uuid4())
-        
-        build_context_path = os.path.join(self.dockerfiles_dir, build_context_id)
-        os.makedirs(build_context_path, exist_ok=True)
-
-        build_logs_list = [] # This will now capture internal logs and serve as a summary if callback is not exhaustive.
+        dockerfile_path = os.path.join(self.dockerfiles_dir, build_context_id, "Dockerfile")
+        build_logs_list = []
 
         try:
+            # Create build context directory and copy necessary files
+            build_context_dir = os.path.join(self.dockerfiles_dir, build_context_id)
+            os.makedirs(build_context_dir, exist_ok=True)
+            analysis_results_dir = os.path.join(build_context_dir, "analysis_results")
+            os.makedirs(analysis_results_dir, exist_ok=True)
+            os.chmod(analysis_results_dir, 0o777)  # Set full permissions for analysis results directory
+
             if log_callback: log_callback(f"Preparing build context {build_context_id} for {repo_name} issue #{issue_number}", "info")
             dockerfile_path = self._create_custom_dockerfile(
                 container_id=build_context_id,
                 repo_url=repo_url,
                 repo_name=repo_name,
                 branch=branch_name if branch_name else 'main',
-                access_token=None, 
+                access_token=access_token,
                 issue_body_content=issue_body
             )
 
-            logger.info(f"Building Docker image with context: {build_context_path}, Dockerfile: {os.path.basename(dockerfile_path)}")
+            logger.info(f"Building Docker image with context: {build_context_dir}, Dockerfile: {os.path.basename(dockerfile_path)}")
             if log_callback: log_callback(f"Dockerfile created at {dockerfile_path}. Starting image build.", "info")
             
             image_tag = f"repopilot-issue-{build_context_id[:8]}"
@@ -864,11 +873,10 @@ ENTRYPOINT ["python3", "/app/container_agent.py"]
             # if platform.system() == "Linux":
             #     build_cmd_args.append("--add-host=host.docker.internal:host-gateway")
 
-            build_cmd_args.append(build_context_path)
+            build_cmd_args.append(build_context_dir)
 
             logger.info(f"Executing Docker build command: docker {' '.join(build_cmd_args)}")
             # build_logs_list will collect internal DockerManager logs, subprocess output is streamed by callback
-            
             process_result = self._run_docker_command(build_cmd_args, log_callback=log_callback, check=False) # check=False to handle error manually
 
             # Collect stdout/stderr from process_result if needed, though callback should handle streaming
@@ -896,26 +904,220 @@ ENTRYPOINT ["python3", "/app/container_agent.py"]
             if log_callback: log_callback(f"Successfully built and tagged image: {image_tag}", "success")
             build_logs_list.append(f"Image built: {image_tag}")
 
-
-            # output_json_host_path = os.path.join(self.dockerfiles_dir, build_context_id, "analysis_output.json")
-            # error_log_host_path = os.path.join(self.dockerfiles_dir, build_context_id, "analysis_error.log")
-
-            # logger.info(f"Attempting to copy analysis files from image {image_id_or_tag_for_copy} to host for build context {build_context_id}")
-            # if log_callback: log_callback(f"Copying analysis files from image {image_id_or_tag_for_copy}...", "info")
+            # Create build context directory and copy necessary files
+            build_context_dir = os.path.join(self.dockerfiles_dir, build_context_id)
+            os.makedirs(build_context_dir, exist_ok=True)
+            analysis_results_dir = os.path.join(build_context_dir, "analysis_results")
+            os.makedirs(analysis_results_dir, exist_ok=True)
+            os.chmod(analysis_results_dir, 0o777)  # Set full permissions for analysis results directory
             
-            # logger.info(f"Target for analysis_output.json: {output_json_host_path}")
-            # if log_callback: log_callback(f"Target for analysis_output.json: {output_json_host_path}", "debug")
-            # copy_output_success = self._copy_file_from_image_to_host(image_id_or_tag_for_copy, "/workspace/analysis_results/analysis_output.json", output_json_host_path, log_callback) 
-            # copy_error_success = self._copy_file_from_image_to_host(image_id_or_tag_for_copy, "/workspace/analysis_results/analysis_error.log", error_log_host_path, log_callback)
+            # Copy container_agent.py to build context
+            agent_script_source_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'container_agent.py'))
+            agent_reqs_source_path = os.path.abspath(os.path.join(os.path.dirname(__file__), 'container_agent_requirements.txt'))
             
-            # if not copy_output_success:
-            #      log_msg = "Warning: Failed to copy analysis_output.json from image to host."
-            #      build_logs_list.append(log_msg)
-            #      if log_callback: log_callback(log_msg, "warning")
-            # if not copy_error_success:
-            #      log_msg = "Warning: Failed to copy analysis_error.log from image to host."
-            #      build_logs_list.append(log_msg)
-            #      if log_callback: log_callback(log_msg, "warning")
+            agent_script_dest_path = os.path.join(build_context_dir, 'container_agent.py')
+            agent_reqs_dest_path = os.path.join(build_context_dir, 'container_agent_requirements.txt')
+
+            if os.path.exists(agent_script_source_path):
+                subprocess.run(['cp', agent_script_source_path, agent_script_dest_path], check=True)
+                logger.info(f"Copied container_agent.py to build context: {agent_script_dest_path}")
+                os.chmod(agent_script_dest_path, 0o755)
+                logger.info(f"Made container_agent.py executable in build context: {agent_script_dest_path}")
+            else:
+                logger.warning(f"container_agent.py not found at {agent_script_source_path}")
+
+            if os.path.exists(agent_reqs_source_path):
+                subprocess.run(['cp', agent_reqs_source_path, agent_reqs_dest_path], check=True)
+                logger.info(f"Copied container_agent_requirements.txt to build context: {agent_reqs_dest_path}")
+            else:
+                logger.warning(f"container_agent_requirements.txt not found at {agent_reqs_source_path}")
+
+            repo_basename = os.path.basename(repo_url)
+            if repo_basename.endswith('.git'):
+                repo_basename = repo_basename[:-4]
+            
+            clone_script_content = """#!/bin/bash
+# Print each command for debugging
+set -ex
+
+WORKSPACE_DIR="/workspace"
+REPO_URL="{0}"
+BRANCH="{1}"
+REPO_NAME="{2}"
+ACCESS_TOKEN="{3}"
+
+echo "====== DEBUG INFO ======"
+echo "Repository URL: $REPO_URL"
+echo "Branch/Tag: $BRANCH"
+echo "Repository name: $REPO_NAME"
+echo "Workspace directory: $WORKSPACE_DIR"
+echo "Current directory: $(pwd)"
+echo "=======================\n"
+
+# Create workspace directory
+mkdir -p "$WORKSPACE_DIR"
+cd "$WORKSPACE_DIR"
+
+
+
+# If we get here, either the archive download failed or it's a regular branch
+# Fall back to standard git clone
+
+# Add authentication if token is provided
+if [ -n "$ACCESS_TOKEN" ]; then
+    AUTH_URL=$(echo "$REPO_URL" | sed "s|https://|https://oauth2:$ACCESS_TOKEN@|")
+    
+    # Try direct clone with branch specified
+    if git clone --depth 1 --branch "$BRANCH" "$AUTH_URL" "$WORKSPACE_DIR/$REPO_NAME" 2>/dev/null; then
+        echo "Successfully cloned repo with branch $BRANCH using authentication"
+        cd "$WORKSPACE_DIR/$REPO_NAME"
+        exit 0
+    else
+        # Try standard clone then checkout
+        if git clone --depth 1 "$AUTH_URL" "$WORKSPACE_DIR/$REPO_NAME"; then
+            cd "$WORKSPACE_DIR/$REPO_NAME"
+            
+            # Try to checkout the branch or tag
+            if git checkout "$BRANCH" 2>/dev/null || git checkout "tags/$BRANCH" 2>/dev/null; then
+                echo "Successfully checked out $BRANCH after cloning"
+                exit 0
+            else
+                echo "Failed to checkout branch/tag $BRANCH, using default branch"
+            fi
+        else
+            echo "Failed to clone repository"
+            exit 1
+        fi
+    fi
+else
+    # No authentication, try direct public clone with branch
+    if git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$WORKSPACE_DIR/$REPO_NAME" 2>/dev/null; then
+        echo "Successfully cloned repo with branch $BRANCH"
+        cd "$WORKSPACE_DIR/$REPO_NAME"
+        exit 0
+    else
+        # Try standard clone then checkout
+        if git clone --depth 1 "$REPO_URL" "$WORKSPACE_DIR/$REPO_NAME"; then
+            cd "$WORKSPACE_DIR/$REPO_NAME"
+            
+            # Try to checkout the branch or tag
+            if git checkout "$BRANCH" 2>/dev/null || git checkout "tags/$BRANCH" 2>/dev/null; then
+                echo "Successfully checked out $BRANCH after cloning"
+                exit 0
+            else
+                echo "Failed to checkout branch/tag $BRANCH, using default branch"
+            fi
+        else
+            echo "Failed to clone repository"
+            exit 1
+        fi
+    fi
+fi
+
+# Verify clone success
+cd "$WORKSPACE_DIR/$REPO_NAME" || exit 1
+echo "Now in $(pwd)"
+
+# Check for requirements.txt and install if present
+if [ -f "requirements.txt" ]; then
+    echo "Installing Python dependencies from requirements.txt..."
+    pip3 install --user -r requirements.txt
+    echo "Successfully installed dependencies from requirements.txt"
+fi
+
+# Check for pyproject.toml and install if present
+if [ -f "pyproject.toml" ]; then
+    echo "Installing Python package from pyproject.toml..."
+    pip3 install --user -e .
+    echo "Successfully installed package from pyproject.toml"
+fi
+
+# Check for package.json and install if present
+if [ -f "package.json" ]; then
+    echo "Installing Node.js dependencies..."
+    # Check if npm is installed
+    if command -v npm &> /dev/null; then
+        npm install
+        echo "Successfully installed Node.js dependencies"
+    else
+        echo "Node.js/npm is not installed, skipping npm dependencies."
+    fi
+fi
+
+echo "Repository $REPO_NAME has been cloned successfully with branch/tag: $BRANCH"
+""".format(
+                repo_url,
+                branch_name if branch_name else 'main',  # Use branch_name here
+                repo_basename,
+                access_token if access_token else ''
+            )
+        
+            with open(os.path.join(build_context_dir, 'clone_repo.sh'), 'w') as f:
+                f.write(clone_script_content)
+            os.chmod(os.path.join(build_context_dir, 'clone_repo.sh'), 0o755)
+            
+            if issue_body is not None:
+                with open(os.path.join(build_context_dir, 'issue.txt'), 'w') as f_issue:
+                    f_issue.write(issue_body)
+                logger.info(f"Created issue.txt in build context: {os.path.join(build_context_dir, 'issue.txt')}")
+                issue_txt_copy_instruction = "COPY issue.txt /app/issue.txt"
+            else:
+                issue_txt_copy_instruction = "# issue_body_content not provided, issue.txt not created"
+
+            dockerfile_content = f"""FROM {self.base_image}
+
+# Arguments that can be passed during build
+ARG REPO_URL
+ARG BRANCH
+ARG ACCESS_TOKEN
+
+# Set environment variables
+ENV REPO_URL=$REPO_URL
+ENV BRANCH=$BRANCH
+ENV ACCESS_TOKEN=$ACCESS_TOKEN
+ENV DEBIAN_FRONTEND=noninteractive
+# Point to Ollama server in the llm-net network
+ENV OLLAMA_HOST=my-ollama:11434
+ENV OLLAMA_API_BASE=http://my-ollama:11434
+ENV REPO_BASENAME={repo_basename}
+
+# Install curl and then Aider using its official script
+RUN wget -qO- https://aider.chat/install.sh | sh
+
+
+# Setup app directory and copy necessary files
+WORKDIR /app
+COPY container_agent.py /app/container_agent.py
+COPY container_agent_requirements.txt /app/container_agent_requirements.txt
+{issue_txt_copy_instruction}
+
+# Install Python dependencies for the agent (e.g., ollama)
+# Aider is installed above via script, ensure container_agent_requirements.txt reflects this (e.g., no aider-chat pip install)
+RUN pip install --no-cache-dir -r /app/container_agent_requirements.txt
+
+# Copy and run the script to clone the repository and install its specific dependencies
+COPY clone_repo.sh /app/clone_repo.sh
+# RUN chmod +x /usr/local/bin/clone_repo.sh
+# Run the clone script. It handles cloning, checkout, and installing repo-specific dependencies.
+# It will exit with non-zero if cloning fails, stopping the build.
+RUN /app/clone_repo.sh
+
+# Set the entrypoint for the container (can be overridden)
+# The container_agent.py will be executed when the container runs with this entrypoint.
+ENTRYPOINT ["python3", "/app/container_agent.py"]
+
+# Default command (useful if entrypoint is just python3, or for interactive use)
+# CMD ["/app/container_agent.py"]
+
+# For development, keep the container running
+CMD ["tail", "-f", "/dev/null"]
+"""
+        
+            logger.info(f"Dockerfile created at: {dockerfile_path}")
+            # logger.debug(f"Dockerfile content:\n{dockerfile_content}") # Can be very verbose
+
+            with open(dockerfile_path, 'w') as f:
+                f.write(dockerfile_content)
             
             return image_id_or_tag_for_copy, build_context_id, build_logs_list, None # repo_dir is None
 

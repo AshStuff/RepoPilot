@@ -1,3 +1,0 @@
-cursor-agent-tools
-ollama
-# Add other specific dependencies of container_agent.py if any 

@@ -31,7 +31,9 @@ class ConnectedRepository(Document):
     name = StringField(required=True)  # Full repository name (e.g., "owner/repo")
     description = StringField()
     is_private = BooleanField(default=False)
+    installation_id = StringField() # Store GitHub App installation ID for this repo
     connected_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow, null=True) # Allow null for old docs
     
     def to_dict(self):
         return {
@@ -40,7 +42,9 @@ class ConnectedRepository(Document):
             'name': self.name,
             'description': self.description,
             'is_private': self.is_private,
-            'connected_at': self.connected_at.isoformat() if self.connected_at else None
+            'installation_id': self.installation_id,
+            'connected_at': self.connected_at.isoformat() if self.connected_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
 
 class User(Document):
@@ -63,6 +67,7 @@ class User(Document):
     name = StringField()
     avatar_url = StringField()
     created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow, null=True) # Allow null for old docs
     token = EmbeddedDocumentField(Token)
     github_access_token = StringField()  # Add this field for GitHub OAuth token
 
@@ -73,7 +78,8 @@ class User(Document):
             'login': self.login,
             'name': self.name,
             'avatar_url': self.avatar_url,
-            'created_at': self.created_at.isoformat() if self.created_at else None
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None
         }
         
     def get_connected_repositories(self):
@@ -151,6 +157,28 @@ class IssueAnalysis(Document):
         self.save()
         
         return log_entry
+    
+    def clean(self):
+        """Custom validation to ensure required fields are present"""
+        errors = {}
+        
+        if not self.repository:
+            errors['repository'] = 'Repository is required'
+        
+        if not self.issue_number:
+            errors['issue_number'] = 'Issue number is required'
+            
+        if not self.issue_id:
+            errors['issue_id'] = 'Issue ID is required'
+        
+        if errors:
+            from mongoengine.errors import ValidationError
+            raise ValidationError('Missing required fields', errors=errors)
+    
+    def save(self, *args, **kwargs):
+        """Override save to ensure validation runs"""
+        self.clean()  # Run custom validation
+        return super().save(*args, **kwargs)
 
 # Initialize MongoDB connection
 def init_app(app):
