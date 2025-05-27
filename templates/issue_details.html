@@ -1041,10 +1041,72 @@
                 <!-- Summary Tab Content -->
                 <div id="summary" class="tab-content" style="display: none;">
                     <h2>Summary</h2>
+                    
                     {% if analysis and analysis.final_output %}
-                        <div class="markdown-content" id="summary-explanation">
+                        <!-- Processing Time Section -->
+                        {% if analysis and analysis.aider_processing_time_seconds is not none %}
+                            <div class="processing-time-section" style="margin-top: 20px; padding: 10px; background-color: #e8f0fe; border-radius: 4px;">
+                                <p style="margin: 0; color: #1967d2;">
+                                    <i class="fas fa-stopwatch"></i> Time from Issue to PR ready: <strong>{{ "%.2f"|format(analysis.aider_processing_time_seconds) }} seconds</strong>
+                                </p>
+                            </div>
+                        {% endif %}
+                        
+                        <!-- Git Changes Section -->
+                        {% if analysis and analysis.git_changes and analysis.git_changes.has_changes %}
+                            <div class="git-changes-section" style="margin-top: 20px;">
+                                <h3>Code Changes</h3>
+                                <p>{{ analysis.git_changes.summary }}</p>
+                                
+                                <div class="git-changes-files" style="margin: 15px 0;">
+                                    <strong>Modified Files ({{ analysis.git_changes.changed_files|length }}):</strong>
+                                    <ul style="margin: 10px 0; padding-left: 20px;">
+                                        {% for file_path in analysis.git_changes.changed_files %}
+                                            <li style="margin: 5px 0; font-family: monospace;">{{ file_path }}</li>
+                                        {% endfor %}
+                                    </ul>
+                                </div>
+                                
+                                <button id="toggle-git-diff" class="git-diff-button" onclick="toggleGitDiff()">
+                                    📋 View Git Diff
+                                </button>
+                                
+                                <div id="git-diff-container" class="git-diff-container" style="display: none;">
+                                    <div class="git-diff-content">
+                                        {% for file_path, file_info in analysis.git_changes.file_diffs.items() %}
+                                            <div class="file-diff" style="margin-bottom: 20px;">
+                                                <div class="file-diff-header">
+                                                    <strong>{{ file_path }}</strong>
+                                                    <span class="file-status {{ file_info.status }}">
+                                                        {% if file_info.status == 'new_file' %}(new file)
+                                                        {% elif file_info.status == 'modified' %}(modified)
+                                                        {% elif file_info.status == 'error' %}(error)
+                                                        {% endif %}
+                                                    </span>
+                                                </div>
+                                                <pre class="diff-content"><code>{{ file_info.diff }}</code></pre>
+                                            </div>
+                                        {% endfor %}
+                                    </div>
+                                </div>
+                            </div>
+                        {% elif analysis and analysis.git_changes and not analysis.git_changes.has_changes %}
+                            <div class="no-changes-section" style="margin-top: 20px;">
+                                <h3>Code Changes</h3>
+                                <p>No file changes were detected after the analysis.</p>
+                            </div>
+                        {% elif analysis and analysis.git_changes and analysis.git_changes.error %}
+                            <div class="git-error-section" style="margin-top: 20px;">
+                                <h3>Code Changes</h3>
+                                <p><strong>Error:</strong> {{ analysis.git_changes.error }}</p>
+                            </div>
+                        {% endif %}
+
+                        <!-- Explanation Section -->
+                        <div class="markdown-content" id="summary-explanation" style="margin-top: 30px;">
                             {{ analysis.final_output|markdown|safe }}
                         </div>
+
                     {% elif analysis and analysis.analysis_status == 'in_progress' %}
                         <p>Analysis is currently in progress. The summary will be available once it's complete.</p>
                     {% elif analysis and analysis.analysis_status == 'pending' %}
@@ -1056,56 +1118,6 @@
                         {% endif %}
                     {% else %}
                         <p>No summary available yet. The analysis may not have run or completed.</p>
-                    {% endif %}
-                    
-                    <!-- Git Changes Section -->
-                    {% if analysis and analysis.git_changes and analysis.git_changes.has_changes %}
-                        <div class="git-changes-section" style="margin-top: 30px;">
-                            <h3>Code Changes</h3>
-                            <p>{{ analysis.git_changes.summary }}</p>
-                            
-                            <div class="git-changes-files" style="margin: 15px 0;">
-                                <strong>Modified Files ({{ analysis.git_changes.changed_files|length }}):</strong>
-                                <ul style="margin: 10px 0; padding-left: 20px;">
-                                    {% for file_path in analysis.git_changes.changed_files %}
-                                        <li style="margin: 5px 0; font-family: monospace;">{{ file_path }}</li>
-                                    {% endfor %}
-                                </ul>
-                            </div>
-                            
-                            <button id="toggle-git-diff" class="git-diff-button" onclick="toggleGitDiff()">
-                                📋 View Git Diff
-                            </button>
-                            
-                            <div id="git-diff-container" class="git-diff-container" style="display: none;">
-                                <div class="git-diff-content">
-                                    {% for file_path, file_info in analysis.git_changes.file_diffs.items() %}
-                                        <div class="file-diff" style="margin-bottom: 20px;">
-                                            <div class="file-diff-header">
-                                                <strong>{{ file_path }}</strong>
-                                                <span class="file-status {{ file_info.status }}">
-                                                    {% if file_info.status == 'new_file' %}(new file)
-                                                    {% elif file_info.status == 'modified' %}(modified)
-                                                    {% elif file_info.status == 'error' %}(error)
-                                                    {% endif %}
-                                                </span>
-                                            </div>
-                                            <pre class="diff-content"><code>{{ file_info.diff }}</code></pre>
-                                        </div>
-                                    {% endfor %}
-                                </div>
-                            </div>
-                        </div>
-                    {% elif analysis and analysis.git_changes and not analysis.git_changes.has_changes %}
-                        <div class="no-changes-section" style="margin-top: 30px;">
-                            <h3>Code Changes</h3>
-                            <p>No file changes were detected after the analysis.</p>
-                        </div>
-                    {% elif analysis and analysis.git_changes and analysis.git_changes.error %}
-                        <div class="git-error-section" style="margin-top: 30px;">
-                            <h3>Code Changes</h3>
-                            <p><strong>Error:</strong> {{ analysis.git_changes.error }}</p>
-                        </div>
                     {% endif %}
                 </div>
             </div>

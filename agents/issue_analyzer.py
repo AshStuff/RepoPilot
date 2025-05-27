@@ -503,6 +503,7 @@ class IssueAnalyzer:
             
             while time.time() - wait_start_time < max_wait_time:
                 if os.path.exists(output_json_path_host):
+                    logger.info(f"Found path: {output_json_path_host}")
                     docker_log_callback(f"Found analysis_output.json after {int(time.time() - wait_start_time)} seconds", "info")
                     analysis_completed = True
                     break
@@ -558,6 +559,13 @@ class IssueAnalyzer:
                         isinstance(analysis_results['solution_analysis'], dict) and
                         'git_changes' in analysis_results['solution_analysis']):
                         git_changes = analysis_results['solution_analysis']['git_changes']
+
+                    aider_processing_time = None
+                    if (isinstance(analysis_results, dict) and
+                        'solution_analysis' in analysis_results and
+                        isinstance(analysis_results['solution_analysis'], dict) and
+                        'aider_processing_time_seconds' in analysis_results['solution_analysis']):
+                        aider_processing_time = analysis_results['solution_analysis']['aider_processing_time_seconds']
 
                     # Check if aider_conversation_log is empty or null
                     if not aider_conversation_log or (isinstance(aider_conversation_log, (list, str)) and len(aider_conversation_log) == 0):
@@ -617,6 +625,12 @@ class IssueAnalyzer:
                                 docker_log_callback("No git changes detected after LLM analysis.", "info")
                         else:
                             docker_log_callback("Git changes information not available.", "warning")
+
+                        if aider_processing_time is not None:
+                            analysis.aider_processing_time_seconds = aider_processing_time
+                            docker_log_callback(f"Aider processing time: {aider_processing_time} seconds", "info")
+                        else:
+                            docker_log_callback("Aider processing time not available.", "warning")
 
                         analysis.analysis_results = analysis_results
                         analysis.analysis_status = 'completed'

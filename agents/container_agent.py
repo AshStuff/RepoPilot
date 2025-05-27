@@ -4,6 +4,7 @@ import os
 import json
 import logging
 import re # Ensure re is imported
+import time # Add time import
 
 try:
     import git
@@ -300,8 +301,11 @@ After applying the fix, please briefly explain the changes you made and why. The
     logger.info(f"Prompting Aider LLM. Issue content length: {len(issue_content)}, Codebase files in prompt context: {len(files_for_prompt)}")
     logger.info("Aider LLM interaction starting (Aider will attempt to modify files directly based on the prompt).")
 
+    aider_start_time = time.time()
     llm_conversation_raw = coder.run(prompt) # Aider's run method returns the conversation string
-    logger.info(f"Aider LLM interaction completed. Raw conversation length: {len(llm_conversation_raw)}")
+    aider_end_time = time.time()
+    aider_processing_time = round(aider_end_time - aider_start_time, 2)
+    logger.info(f"Aider LLM interaction completed in {aider_processing_time} seconds. Raw conversation length: {len(llm_conversation_raw)}")
     
     # Extract the explanation from the conversation
     explanation_marker_match = re.search(r"(?:\*\*|##|#|)\s*Explanation[:\*\*]*", llm_conversation_raw, re.IGNORECASE)
@@ -408,6 +412,7 @@ After applying the fix, please briefly explain the changes you made and why. The
         "action_taken": "Aider LLM was instructed to identify and fix the bug based on the issue.",
         "aider_conversation_log": llm_conversation_raw,
         "explanation": explanation,
+        "aider_processing_time_seconds": aider_processing_time, # Add processing time
         "notes": "Aider attempts to modify files directly in the workspace. Check the /workspace/repo_name/ directory for changes.",
         "git_changes": git_changes
     }
