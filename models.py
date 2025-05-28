@@ -186,6 +186,78 @@ class IssueAnalysis(Document):
         self.clean()  # Run custom validation
         return super().save(*args, **kwargs)
 
+class CiPrAnalysis(Document):
+    repository = ReferenceField('ConnectedRepository', required=True)
+    pr_number = IntField(required=True)
+    pr_id = StringField(required=True) # GitHub PR ID
+    pr_title = StringField()
+    pr_html_url = StringField()
+    commit_sha = StringField() # SHA of the commit with the CI failure
+
+    ci_status = StringField(choices=['failed', 'error', 'pending_fix', 'fixed', 'resolved_by_user'], default='failed')
+    ci_failure_context = StringField() # e.g., "ci/circleci: build"
+    ci_failure_description = StringField()
+    ci_target_url = StringField() # Link to the CI job page
+    ci_failure_details_list = ListField(StringField()) # Stores a list of specific failure messages
+
+    # Fields for potential automated fix attempts (similar to IssueAnalysis)
+    analysis_status = StringField(choices=['not_started', 'in_progress', 'completed', 'failed'], default='not_started')
+    analysis_logs = ListField(DictField()) # Logs for fix attempts
+    fix_pr_url = StringField() # URL of a PR created by RepoPilot to fix this CI failure
+    error_message = StringField() # If RepoPilot fails to fix
+
+    created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow)
+
+    meta = {
+        'collection': 'ci_pr_analyses',
+        'indexes': [
+            {'fields': ['repository', 'pr_number'], 'unique': True},
+            'ci_status',
+            'analysis_status',
+            'created_at'
+        ]
+    }
+
+    def to_dict(self):
+        return {
+            'id': str(self.id),
+            'repository': self.repository.to_dict() if self.repository else None,
+            'pr_number': self.pr_number,
+            'pr_id': self.pr_id,
+            'pr_title': self.pr_title,
+            'pr_html_url': self.pr_html_url,
+            'commit_sha': self.commit_sha,
+            'ci_status': self.ci_status,
+            'ci_failure_context': self.ci_failure_context,
+            'ci_failure_description': self.ci_failure_description,
+            'ci_target_url': self.ci_target_url,
+            'ci_failure_details_list': self.ci_failure_details_list,
+            'analysis_status': self.analysis_status,
+            'analysis_logs': self.analysis_logs,
+            'fix_pr_url': self.fix_pr_url,
+            'error_message': self.error_message,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+    def add_log(self, message, type="info"):
+        timestamp = datetime.utcnow().isoformat()
+        log_entry = {
+            'timestamp': timestamp,
+            'message': message,
+            'type': type
+        }
+        if not hasattr(self, 'analysis_logs') or self.analysis_logs is None:
+            self.analysis_logs = []
+        self.analysis_logs.append(log_entry)
+        self.updated_at = datetime.utcnow()
+        # self.save() # Avoid double save if called within another save operation
+
+    def save(self, *args, **kwargs):
+        self.updated_at = datetime.utcnow()
+        return super().save(*args, **kwargs)
+
 # Initialize MongoDB connection
 def init_app(app):
     connect(host=app.config['MONGODB_SETTINGS']['host']) 

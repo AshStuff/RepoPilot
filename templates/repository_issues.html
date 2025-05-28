@@ -201,6 +201,14 @@
         margin-top: 4px;
         font-size: 0.9rem;
         color: #586069;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px;
+    }
+
+    .issue-meta > span {
+        white-space: nowrap;
     }
 
     .issue-labels {
@@ -338,6 +346,46 @@
         border-color: #0366d6;
         box-shadow: 0 0 0 3px rgba(3, 102, 214, 0.3);
     }
+
+    /* PR-specific styles */
+    .pr-item {
+        border-left: 3px solid #f85149;
+        background-color: #fff5f5;
+    }
+
+    .pr-item:hover {
+        background-color: #fef2f2;
+    }
+
+    .branch-info {
+        display: inline-block;
+        margin-left: 12px;
+        padding: 2px 8px;
+        background-color: #f6f8fa;
+        border-radius: 12px;
+        font-size: 0.8rem;
+        color: #656d76;
+        border: 1px solid #d1d9e0;
+    }
+
+    .branch-info i {
+        margin-right: 4px;
+    }
+
+    .ci-status {
+        display: inline-block;
+        margin-left: 12px;
+        padding: 2px 8px;
+        background-color: #fff1f0;
+        border-radius: 12px;
+        font-size: 0.8rem;
+        color: #d1242f;
+        border: 1px solid #f85149;
+    }
+
+    .ci-status i {
+        margin-right: 4px;
+    }
 </style>
 {% endblock %}
 
@@ -392,9 +440,9 @@
                         Resolved Issues
                         <span class="issue-count resolved-count">0</span>
                     </button>
-                    <button class="tab-button" data-tab="unresolved">
-                        Unresolved Issues
-                        <span class="issue-count unresolved-count">0</span>
+                    <button class="tab-button" data-tab="ci-fix-in-progress">
+                        CI-Fix In Progress
+                        <span class="issue-count ci-fix-count">0</span>
                     </button>
                 </div>
 
@@ -465,14 +513,49 @@
                     </div>
                 </div>
 
-                <div id="unresolved" class="tab-content">
+                <div id="ci-fix-in-progress" class="tab-content">
                     <div class="issues-list">
+                        <!-- Failed CI PRs -->
+                        {% if failed_ci_prs %}
+                            {% for pr in failed_ci_prs %}
+                                <div class="issue-item pr-item">
+                                    <div class="issue-icon">
+                                        <i class="fas fa-code-branch" style="color: #f85149;"></i>
+                                    </div>
+                                    <div class="issue-content">
+                                        <a href="{{ url_for('ci_fix_details', repo_name=repository.full_name, pr_number=pr.number) }}" target="_blank" class="issue-title">
+                                            {{ pr.title }}
+                                        </a>
+                                        <div class="issue-meta">
+                                            PR #{{ pr.number }} opened {{ pr.created_at|datetime }} by {{ pr.user.login }}
+                                            <span class="branch-info">
+                                                <i class="fas fa-code-branch"></i> {{ pr.branch_name }} → {{ pr.base.ref }}
+                                            </span>
+                                            <span class="ci-status">
+                                                <i class="fas fa-times-circle" style="color: #f85149;"></i> CI Failed: {{ pr.ci_failure_context or 'Unknown Check' }}
+                                            </span>
+                                        </div>
+                                        {% if pr.labels %}
+                                            <div class="issue-labels">
+                                                {% for label in pr.labels %}
+                                                    <span class="issue-label" data-color="{{ label.color }}">
+                                                        {{ label.name }}
+                                                    </span>
+                                                {% endfor %}
+                                            </div>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            {% endfor %}
+                        {% endif %}
+                        
+                        <!-- Issues with ci-fix-in progress label -->
                         {% if issues %}
                             {% for issue in issues %}
-                                {% if issue.state == 'open' and issue.labels|selectattr("name", "equalto", "bug")|list %}
+                                {% if issue.state == 'open' and issue.labels|selectattr("name", "equalto", "ci-fix-in progress")|list %}
                                     <div class="issue-item">
                                         <div class="issue-icon">
-                                            <i class="fas fa-bug"></i>
+                                            <i class="fas fa-cogs"></i>
                                         </div>
                                         <div class="issue-content">
                                             <a href="{{ url_for('issue_details', repo_name=repository.full_name, issue_number=issue.number) }}" class="issue-title">
@@ -495,12 +578,39 @@
                                 {% endif %}
                             {% endfor %}
                         {% endif %}
+                        
+                        <!-- Empty state -->
+                        {% set ci_fix_issues = [] %}
+                        {% if issues %}
+                            {% for issue in issues %}
+                                {% if issue.state == 'open' and issue.labels %}
+                                    {% for label in issue.labels %}
+                                        {% if label.name == "ci-fix-in progress" %}
+                                            {% set _ = ci_fix_issues.append(issue) %}
+                                        {% endif %}
+                                    {% endfor %}
+                                {% endif %}
+                            {% endfor %}
+                        {% endif %}
+                        
+                        {% if not failed_ci_prs and not ci_fix_issues %}
+                            <div class="no-issues">
+                                <i class="fas fa-check-circle" style="font-size: 2rem; color: #28a745; margin-bottom: 1rem;"></i>
+                                <p>No CI failures or ongoing fixes found.</p>
+                            </div>
+                        {% endif %}
                     </div>
                 </div>
             </div>
         </div>
 
-        <!-- Footer -->
+        <!-- Hidden div to store initial data from Flask/Jinja -->
+        <div id="initial-data-store"
+             data-repository-full-name="{{ repository.full_name|e }}"
+             data-initial-issues='{{ issues|tojson|safe }}'
+             data-initial-failed-ci-prs='{{ failed_ci_prs|tojson|safe }}'>
+        </div>
+
         <footer class="footer">
             <div class="footer-content">
                 <div class="footer-copyright">
@@ -520,7 +630,11 @@
 {% block scripts %}
 <script>
     document.addEventListener('DOMContentLoaded', function() {
-        // Tab switching functionality
+        const initialDataStore = document.getElementById('initial-data-store');
+        const REPOSITORY_FULL_NAME = initialDataStore.dataset.repositoryFullName;
+        const INITIAL_ISSUES = JSON.parse(initialDataStore.dataset.initialIssues || '[]');
+        const INITIAL_FAILED_CI_PRS = JSON.parse(initialDataStore.dataset.initialFailedCiPrs || '[]');
+
         const tabButtons = document.querySelectorAll('.tab-button');
         const tabContents = document.querySelectorAll('.tab-content');
 
@@ -537,14 +651,12 @@
             });
         });
 
-        // Real-time updates functionality
         function setupRealtimeUpdates() {
-            const repoName = '{{ repository.full_name }}';
-            const eventSource = new EventSource(`/api/repository-issues-updates/${repoName}`);
+            const eventSource = new EventSource(`/api/repository-issues-updates/${REPOSITORY_FULL_NAME}`);
 
             eventSource.onmessage = function(event) {
                 const data = JSON.parse(event.data);
-                updateIssuesList(data.issues);
+                updateIssuesList(data.issues, data.failed_ci_prs);
             };
 
             eventSource.onerror = function(error) {
@@ -555,99 +667,157 @@
             };
         }
 
-        // Update the issues list with new data
-        function updateIssuesList(issues) {
-            if (!issues || !issues.length) return;
+        function updateIssuesList(issues, failedCiPrs = []) {
+            console.log("updateIssuesList called. Issues:", JSON.stringify(issues), "Failed CI PRs:", JSON.stringify(failedCiPrs));
 
-            // Clear existing issues
-            document.querySelector('#ongoing .issues-list').innerHTML = '';
-            document.querySelector('#resolved .issues-list').innerHTML = '';
-            document.querySelector('#unresolved .issues-list').innerHTML = '';
+            if (!issues) issues = []; // Ensure issues is an array
+            if (!failedCiPrs) failedCiPrs = []; // Ensure failedCiPrs is an array
 
-            // Add issues to their respective tabs
-            issues.forEach(issue => {
-                if (issue.state === 'closed') {
-                    // Add to resolved tab
-                    addIssueToList(issue, 'resolved', true);
-                } else if (!issue.closed_at) {
-                    // Add to ongoing tab
-                    addIssueToList(issue, 'ongoing', false);
-                    
-                    // Check if this is also a bug issue
-                    const isBugIssue = issue.labels && issue.labels.some(label => label.name === 'bug');
-                    if (isBugIssue) {
-                        // Add to unresolved tab
-                        addIssueToList(issue, 'unresolved', false, true);
+            const ongoingList = document.querySelector('#ongoing .issues-list');
+            const resolvedList = document.querySelector('#resolved .issues-list');
+            const ciFixList = document.querySelector('#ci-fix-in-progress .issues-list');
+
+            if (!ongoingList || !resolvedList || !ciFixList) {
+                console.error("Could not find one or more list containers in the DOM.");
+                return;
+            }
+
+            ongoingList.innerHTML = '';
+            resolvedList.innerHTML = '';
+            ciFixList.innerHTML = '';
+            console.log("Lists cleared.");
+
+            let ciFixCount = 0;
+
+            try {
+                failedCiPrs.forEach(pr => {
+                    if (pr && typeof pr === 'object') { // Basic check for valid PR object
+                        addPRToList(pr, ciFixList);
+                        ciFixCount++;
+                    } else {
+                        console.warn("Skipping invalid PR data item:", pr);
                     }
-                }
-            });
+                });
+            } catch (e) {
+                console.error("Error processing failedCiPrs:", e);
+            }
+            console.log("Finished processing failedCiPrs. ciFixCount:", ciFixCount);
 
-            // Update counts
-            updateIssueCounts();
+            try {
+                issues.forEach(issue => {
+                    if (issue && typeof issue === 'object') { // Basic check for valid issue object
+                        const isCiFixLabelPresent = issue.labels && issue.labels.some(label => label.name && label.name.toLowerCase() === 'ci-fix-in progress');
+                        if (issue.state === 'closed') {
+                            addIssueToList(issue, resolvedList, true);
+                        } else {
+                            addIssueToList(issue, ongoingList, false);
+                            if (isCiFixLabelPresent) {
+                                addIssueToList(issue, ciFixList, false, false, true);
+                                ciFixCount++;
+                            }
+                        }
+                    } else {
+                        console.warn("Skipping invalid issue data item:", issue);
+                    }
+                });
+            } catch (e) {
+                console.error("Error processing issues:", e);
+            }
+            console.log("Finished processing issues.");
             
-            // Apply colors to labels
-            document.querySelectorAll('.issue-label').forEach(label => {
-                const color = label.dataset.color;
-                label.style.backgroundColor = `#${color}20`;
-                label.style.color = `#${color}`;
-            });
+            if (ongoingList.children.length === 0) {
+                ongoingList.innerHTML = '<div class="no-issues"><p>No on-going issues with the \'RepoPilot help\' label.</p></div>';
+            }
+            if (resolvedList.children.length === 0) {
+                resolvedList.innerHTML = '<div class="no-issues"><p>No resolved issues with the \'RepoPilot help\' label.</p></div>';
+            }
+            if (ciFixList.children.length === 0) {
+                ciFixList.innerHTML = '<div class="no-issues"><i class="fas fa-check-circle" style="font-size: 2rem; color: #28a745; margin-bottom: 1rem;"></i><p>No CI failures or ongoing fixes found.</p></div>';
+            }
+            console.log("Empty states updated if necessary.");
+
+            updateIssueCounts(ciFixCount);
+            applyLabelStyles();
+            console.log("Counts and styles updated.");
         }
 
-        // Helper function to add an issue to a specific tab
-        function addIssueToList(issue, tabId, isClosed, isBug = false) {
-            const container = document.querySelector(`#${tabId} .issues-list`);
-            const issueElement = document.createElement('div');
-            issueElement.className = isClosed ? 'issue-item issue-closed' : 'issue-item';
-            
-            const iconClass = isBug ? 'fa-bug' : (isClosed ? 'fa-check-circle' : 'fa-exclamation-circle');
-            const timeInfo = isClosed ? 
-                `closed ${formatDate(new Date(issue.closed_at))} by ${issue.user.login}` : 
-                `opened ${formatDate(new Date(issue.created_at))} by ${issue.user.login}`;
-            
-            // Extract repository name from the issue URL
-            const repoName = issue.repository_url.split('/repos/')[1];
-            
-            issueElement.innerHTML = `
-                <div class="issue-icon">
-                    <i class="fas ${iconClass}"></i>
-                </div>
-                <div class="issue-content">
-                    <a href="/repository/${encodeURIComponent(repoName)}/issues/${issue.number}" class="issue-title">
-                        ${issue.title}
-                    </a>
-                    <div class="issue-meta">
-                        #${issue.number} ${timeInfo}
-                    </div>
-                    ${issue.labels && issue.labels.length ? `
-                        <div class="issue-labels">
-                            ${issue.labels.map(label => `
-                                <span class="issue-label" data-color="${label.color}">
-                                    ${label.name}
-                                </span>
-                            `).join('')}
-                        </div>
-                    ` : ''}
-                </div>
-            `;
-            
-            container.appendChild(issueElement);
-            
-            // Add click event listener to the issue link
-            const issueLink = issueElement.querySelector('.issue-title');
-            if (issueLink) {
-                issueLink.addEventListener('click', (event) => {
-                    const url = issueLink.getAttribute('href');
-                    const repoPath = url.split('/repository/')[1].split('/issues/')[0];
-                    const issueNum = url.split('/issues/')[1];
-                    
-                    // Trigger the analysis in the background
-                    fetch(`/api/analyze-issue/${repoPath}/${issueNum}`, { method: 'GET' })
-                        .catch(error => console.error('Error pre-triggering analysis:', error));
-                });
+        function addIssueToList(issue, container, isClosed, isBug = false, isCiFix = false) {
+            try {
+                const issueElement = document.createElement('div');
+                issueElement.className = isClosed ? 'issue-item issue-closed' : 'issue-item';
+                const iconClass = isClosed ? 'fa-check-circle' : isCiFix ? 'fa-cogs' : (isBug || (issue.labels && issue.labels.some(l => l.name && l.name.toLowerCase().includes('bug')))) ? 'fa-bug' : 'fa-exclamation-circle';
+                const timeInfo = isClosed ? 
+                    `closed ${formatDate(new Date(issue.closed_at))} by ${issue.user ? issue.user.login : 'unknown'}` : 
+                    `opened ${formatDate(new Date(issue.created_at))} by ${issue.user ? issue.user.login : 'unknown'}`;
+                const repoFullName = issue.repository_url ? issue.repository_url.split('/repos/')[1] : REPOSITORY_FULL_NAME; // Fallback
+
+                issueElement.innerHTML = `
+                    <div class="issue-icon"><i class="fas ${iconClass}"></i></div>
+                    <div class="issue-content">
+                        <a href="/repository/${encodeURIComponent(repoFullName)}/issues/${issue.number}" class="issue-title">${issue.title || 'No Title'}</a>
+                        <div class="issue-meta">#${issue.number} ${timeInfo}</div>
+                        ${renderLabels(issue.labels)}
+                    </div>`;
+                container.appendChild(issueElement);
+                
+                // Add click event listener to the issue link
+                const issueLink = issueElement.querySelector('.issue-title');
+                if (issueLink) {
+                    issueLink.addEventListener('click', (event) => {
+                        const url = issueLink.getAttribute('href');
+                        const repoPath = url.split('/repository/')[1].split('/issues/')[0];
+                        const issueNum = url.split('/issues/')[1];
+                        
+                        // Trigger the analysis in the background
+                        fetch(`/api/analyze-issue/${repoPath}/${issueNum}`, { method: 'GET' })
+                            .catch(error => console.error('Error pre-triggering analysis:', error));
+                    });
+                }
+            } catch (e) {
+                console.error("Error in addIssueToList for issue:", issue, e);
             }
         }
 
-        // Helper function to format dates
+        function addPRToList(pr, container) {
+            try {
+                const prElement = document.createElement('div');
+                prElement.className = 'repository-card pr-item'; // Use repository-card and add pr-item for potential specific CI styling
+                
+                const timeInfo = `opened ${formatDate(new Date(pr.created_at))} by ${pr.user ? pr.user.login : 'unknown'}`;
+                const prDetailsUrl = `/repository/${encodeURIComponent(REPOSITORY_FULL_NAME)}/ci-fix/${pr.number}`;
+                const prDescription = pr.body ? (pr.body.substring(0, 100) + (pr.body.length > 100 ? '...' : '')) : 'No description provided.';
+
+                prElement.innerHTML = `
+                    <div class="repo-header">
+                        <h3>
+                            <a href="${prDetailsUrl}" class="repo-name-link" title="${pr.title || 'No Title'}">
+                                <span class="repo-owner">PR #${pr.number}</span> 
+                                / 
+                                <span class="repo-name" style="white-space: normal; word-break: break-word;">${pr.title || 'No Title'}</span>
+                            </a>
+                        </h3>
+                        <span class="visibility ci-status" style="border-color: #f85149; color: #d1242f; background-color: #fff1f0;">
+                            <i class="fas fa-times-circle"></i> CI Failed
+                        </span>
+                    </div>
+                    <p class="repo-description">${(pr.ci_failure_context || 'Failed Check')}: ${pr.ci_failure_description || 'Details not available'}</p>
+                    <div class="repo-footer">
+                        <div class="repo-stats" style="font-size: 0.8em;">
+                            <span><i class="fas fa-user"></i> ${pr.user ? pr.user.login : 'unknown'}</span>
+                            <span><i class="fas fa-clock"></i> ${formatDate(new Date(pr.created_at))}</span>
+                            <span class="branch-info" style="padding: 2px 6px; font-size:0.9em;">
+                                <i class="fas fa-code-branch"></i> ${pr.head ? pr.head.ref : '-'} 
+                            </span>
+                        </div>
+                        <a href="${prDetailsUrl}" class="view-repo">View Details</a>
+                    </div>
+                `;
+                container.appendChild(prElement);
+            } catch (e) {
+                console.error("Error in addPRToList for PR:", pr, e);
+            }
+        }
+
         function formatDate(date) {
             const now = new Date();
             const diff = now - date;
@@ -669,43 +839,46 @@
             });
         }
 
-        // Update issue counts
-        function updateIssueCounts() {
+        function updateIssueCounts(ciFixCount = null) {
             const ongoingIssues = document.querySelectorAll('#ongoing .issue-item').length;
             const resolvedIssues = document.querySelectorAll('#resolved .issue-item').length;
-            const unresolvedIssues = document.querySelectorAll('#unresolved .issue-item').length;
+            
+            // Use provided count or calculate from DOM
+            const ciFixIssues = ciFixCount !== null ? ciFixCount : document.querySelectorAll('#ci-fix-in-progress .issue-item').length;
 
             document.querySelector('.ongoing-count').textContent = ongoingIssues;
             document.querySelector('.resolved-count').textContent = resolvedIssues;
-            document.querySelector('.unresolved-count').textContent = unresolvedIssues;
+            document.querySelector('.ci-fix-count').textContent = ciFixIssues;
         }
 
-        // Initial count update
-        updateIssueCounts();
+        function renderLabels(labels) {
+            if (!labels || !labels.length) return '';
+            return `<div class="issue-labels">
+                        ${labels.map(label => {
+                            // Ensure label.color exists, provide a default if not
+                            const labelColor = label.color || 'ededed'; 
+                            return `<span class="issue-label" data-color="${labelColor}">${label.name}</span>`;
+                        }).join('')}
+                    </div>`;
+        }
 
-        // Apply colors to labels
-        document.querySelectorAll('.issue-label').forEach(label => {
-            const color = label.dataset.color;
-            label.style.backgroundColor = `#${color}20`;
-            label.style.color = `#${color}`;
-        });
+        function applyLabelStyles() {
+            document.querySelectorAll('.issue-label').forEach(label => {
+                const color = label.dataset.color || 'ededed';
+                const r = parseInt(color.substring(0,2), 16);
+                const g = parseInt(color.substring(2,4), 16);
+                const b = parseInt(color.substring(4,6), 16);
+                const brightness = (r * 299 + g * 587 + b * 114) / 1000;
+                const textColor = brightness > 128 ? '#000000' : '#FFFFFF';
 
-        // Pre-trigger analysis when clicking on issue links
-        document.querySelectorAll('.issue-title').forEach(link => {
-            link.addEventListener('click', (event) => {
-                const url = link.getAttribute('href');
-                const repoName = url.split('/repository/')[1].split('/issues/')[0];
-                const issueNumber = url.split('/issues/')[1];
-                
-                // Trigger the analysis in the background
-                fetch(`/api/analyze-issue/${repoName}/${issueNumber}`, { method: 'GET' })
-                    .catch(error => console.error('Error pre-triggering analysis:', error));
-                
-                // Continue with the normal link navigation
+                label.style.backgroundColor = `#${color}`;
+                label.style.color = textColor;
+                // Optionally add a border too, e.g.:
+                // label.style.border = `1px solid #${color}bf`; 
             });
-        });
+        }
         
-        // Initialize real-time updates
+        updateIssuesList(INITIAL_ISSUES, INITIAL_FAILED_CI_PRS);
         setupRealtimeUpdates();
     });
 </script>

@@ -11,7 +11,7 @@ import tempfile
 from datetime import timedelta, datetime
 import hashlib
 import base64
-from models import User, Token, init_app, ConnectedRepository, IssueAnalysis
+from models import User, Token, init_app, ConnectedRepository, IssueAnalysis, CiPrAnalysis
 from mongoengine.errors import NotUniqueError
 from bson import ObjectId
 import json
@@ -26,6 +26,7 @@ from markdown.extensions import fenced_code
 from markdown.extensions.codehilite import CodeHiliteExtension
 from markdown.extensions.tables import TableExtension
 from agents.issue_analyzer import IssueAnalyzer
+from agents.pr_issue_analyzer import PrIssueAnalyzer  # Add this import
 from agents.utils import _get_default_requirements
 import subprocess
 import threading
@@ -1128,6 +1129,281 @@ def github_webhook():
             
             return jsonify({'message': 'Issue comment event processed'}), 200
         
+        elif event_type == 'status':
+            state = data.get('state')
+            context = data.get('context', '')
+            description = data.get('description', '')
+            target_url = data.get('target_url', '')
+            sha = data.get('sha')
+            repo_data = data.get('repository', {})
+            repo_name = repo_data.get('full_name')
+
+            logger.info(f"Webhook: CI Status event: {state} for {context} on {repo_name} commit {sha[:8] if sha else 'unknown'}")
+
+            if sha and repo_name:
+                connected_repo = ConnectedRepository.objects(name=repo_name).first()
+                if connected_repo and connected_repo.user and connected_repo.user.github_access_token:
+                    access_token = connected_repo.user.github_access_token
+                    pr_details = asyncio.run(fetch_pr_details_for_commit(repo_name, sha, access_token))
+
+                    if pr_details:
+                        pr_number = pr_details.get('number')
+                        pr_id = str(pr_details.get('id'))
+                        pr_title = pr_details.get('title')
+                        pr_html_url = pr_details.get('html_url')
+
+                        if state in ['failure', 'error']:
+                            logger.info(f"Webhook: CI failure (status) for PR #{pr_number} in {repo_name}. Context: {context}, Desc: {description}")
+                            CiPrAnalysis.objects(repository=connected_repo, pr_number=pr_number).modify(
+                                set__pr_id=pr_id,
+                                set__pr_title=pr_title,
+                                set__pr_html_url=pr_html_url,
+                                set__commit_sha=sha,
+                                set__ci_status=state, # 'failure' or 'error'
+                                set__ci_failure_context=context,
+                                set__ci_failure_description=description,
+                                add_to_set__ci_failure_details_list=f"Status: {context} - {description}",
+                                set__ci_target_url=target_url,
+                                set__updated_at=datetime.utcnow(),
+                                upsert=True,
+                                set_on_insert__created_at=datetime.utcnow(),
+                                set_on_insert__analysis_status='not_started' # Default for new entries
+                            )
+                            logger.info(f"Webhook: Upserted CiPrAnalysis for PR #{pr_number} in {repo_name} with status '{state}'.")
+                            
+                            # Trigger PR issue analysis for CI failure
+                            try:
+                                ci_analysis = CiPrAnalysis.objects(repository=connected_repo, pr_number=pr_number).first()
+                                if ci_analysis:
+                                    ci_analysis.add_log(f"Webhook: Preparing to analyze PR #{pr_number} for commit {sha[:7]}. Status: {ci_analysis.analysis_status}", "info")
+                                    ci_analysis.save() # Ensure this log is saved immediately
+
+                                    if ci_analysis.analysis_status == 'not_started':
+                                        ci_analysis.add_log(f"Webhook: Status is 'not_started'. Triggering PrIssueAnalyzer for PR #{pr_number}.", "info")
+                                        ci_analysis.save() # Save before passing to analyzer
+                                        logger.info(f"Webhook: Triggering PR issue analysis for CI failure in PR #{pr_number}")
+                                        pr_analyzer = PrIssueAnalyzer()
+                                        pr_analyzer.analyze_ci_failure(
+                                            pr_data=pr_details,
+                                            repository=connected_repo,
+                                            access_token=access_token,
+                                            initial_analysis_object=ci_analysis
+                                        )
+                                        logger.info(f"Webhook: Started PR issue analysis for PR #{pr_number}")
+                                    else:
+                                        ci_analysis.add_log(f"Webhook: Analysis status for PR #{pr_number} is '{ci_analysis.analysis_status}'. Analyzer not triggered.", "warning")
+                                        ci_analysis.save()
+                                else:
+                                    logger.error(f"Webhook: Could not find/create CiPrAnalysis object for PR #{pr_number} before triggering analyzer.")
+                            except Exception as e:
+                                logger.error(f"Error triggering PR issue analysis for PR #{pr_number}: {str(e)}")
+                                logger.error(traceback.format_exc())
+                        elif state == 'success':
+                            logger.info(f"Webhook: CI success (status) for PR #{pr_number} in {repo_name}. Context: {context}")
+                            # Mark as resolved or delete. For now, let's mark as resolved_by_user.
+                            # This assumes 'success' means all relevant checks for that commit passed.
+                            # More sophisticated logic might be needed if multiple CI systems report to the same commit.
+                            analysis_record = CiPrAnalysis.objects(repository=connected_repo, pr_number=pr_number, commit_sha=sha).first()
+                            if analysis_record and analysis_record.ci_status in ['failed', 'error']:
+                                analysis_record.modify(
+                                    set__ci_status='resolved_by_user', # Or 'fixed' if RepoPilot initiated a fix.
+                                    set__updated_at=datetime.utcnow()
+                                )
+                                logger.info(f"Webhook: Marked CiPrAnalysis for PR #{pr_number} in {repo_name} as 'resolved_by_user' due to success status.")
+                    else:
+                        logger.warning(f"Webhook: (Status event) Could not find PR for commit {sha} in {repo_name}. State was {state}.")
+                else:
+                    logger.warning(f"Webhook: (Status event) No connected repository or access token for {repo_name}. State was {state}.")
+            return jsonify({'message': 'Status event processed'}), 200
+
+        elif event_type == 'check_run':
+            action = data.get('action')
+            check_run = data.get('check_run', {})
+            conclusion = check_run.get('conclusion')
+            status = check_run.get('status') # Note: check_run 'status' can be 'completed' while 'conclusion' is 'failure'
+            name = check_run.get('name', '')
+            head_sha = check_run.get('head_sha')
+            repo_data = data.get('repository', {})
+            repo_name = repo_data.get('full_name')
+            html_url = check_run.get('html_url', '') # URL to the check run itself
+
+            logger.info(f"Webhook: Check run event: {action} for {name} on {repo_name} (status: {status}, conclusion: {conclusion})")
+
+            if action == 'completed' and head_sha and repo_name:
+                connected_repo = ConnectedRepository.objects(name=repo_name).first()
+                if connected_repo and connected_repo.user and connected_repo.user.github_access_token:
+                    access_token = connected_repo.user.github_access_token
+                    pr_details = asyncio.run(fetch_pr_details_for_commit(repo_name, head_sha, access_token))
+
+                    if pr_details:
+                        pr_number = pr_details.get('number')
+                        pr_id = str(pr_details.get('id'))
+                        pr_title = pr_details.get('title')
+                        pr_html_url = pr_details.get('html_url')
+
+                        if conclusion in ['failure', 'timed_out', 'cancelled', 'action_required']: 
+                            logger.info(f"Webhook: CI failure (check_run) for PR #{pr_number} in {repo_name}. Name: {name}, Conclusion: {conclusion}")
+                            
+                            # Map incoming conclusion to a valid CiPrAnalysis.ci_status
+                            final_ci_status = 'failed' # Default for this block
+                            if conclusion == 'failure':
+                                final_ci_status = 'failure'
+                            elif conclusion in ['timed_out', 'cancelled', 'action_required']:
+                                final_ci_status = 'error' # Map these to 'error'
+                            
+                            CiPrAnalysis.objects(repository=connected_repo, pr_number=pr_number).modify(
+                                set__pr_id=pr_id,
+                                set__pr_title=pr_title,
+                                set__pr_html_url=pr_html_url,
+                                set__commit_sha=head_sha,
+                                set__ci_status=final_ci_status, # Use mapped status
+                                set__ci_failure_context=name,
+                                set__ci_failure_description=f"Check run '{name}' concluded with {conclusion}",
+                                add_to_set__ci_failure_details_list=f"Check: {name} - {conclusion}",
+                                set__ci_target_url=html_url,
+                                set__updated_at=datetime.utcnow(),
+                                upsert=True,
+                                set_on_insert__created_at=datetime.utcnow(),
+                                set_on_insert__analysis_status='not_started'
+                            )
+                            logger.info(f"Webhook: Upserted CiPrAnalysis for PR #{pr_number} in {repo_name} with conclusion '{conclusion}' as ci_status '{final_ci_status}'.")
+                            
+                            # Trigger PR issue analysis for CI failure
+                            try:
+                                ci_analysis = CiPrAnalysis.objects(repository=connected_repo, pr_number=pr_number).first()
+                                if ci_analysis:
+                                    ci_analysis.add_log(f"Webhook: Preparing to analyze PR #{pr_number} for commit {head_sha[:7]}. Status: {ci_analysis.analysis_status}", "info")
+                                    ci_analysis.save() # Ensure this log is saved immediately
+
+                                    if ci_analysis.analysis_status == 'not_started':
+                                        ci_analysis.add_log(f"Webhook: Status is 'not_started'. Triggering PrIssueAnalyzer for PR #{pr_number}.", "info")
+                                        ci_analysis.save() # Save before passing to analyzer
+                                        logger.info(f"Webhook: Triggering PR issue analysis for CI failure in PR #{pr_number}")
+                                        pr_analyzer = PrIssueAnalyzer()
+                                        pr_analyzer.analyze_ci_failure(
+                                            pr_data=pr_details,
+                                            repository=connected_repo,
+                                            access_token=access_token,
+                                            initial_analysis_object=ci_analysis
+                                        )
+                                        logger.info(f"Webhook: Started PR issue analysis for PR #{pr_number}")
+                                    else:
+                                        ci_analysis.add_log(f"Webhook: Analysis status for PR #{pr_number} is '{ci_analysis.analysis_status}'. Analyzer not triggered.", "warning")
+                                        ci_analysis.save()
+                                else:
+                                    logger.error(f"Webhook: Could not find/create CiPrAnalysis object for PR #{pr_number} before triggering analyzer.")
+                            except Exception as e:
+                                logger.error(f"Error triggering PR issue analysis for PR #{pr_number}: {str(e)}")
+                                logger.error(traceback.format_exc())
+                        elif conclusion == 'success':
+                            logger.info(f"Webhook: CI success (check_run) for PR #{pr_number} in {repo_name}. Name: {name}")
+                            analysis_record = CiPrAnalysis.objects(repository=connected_repo, pr_number=pr_number, commit_sha=head_sha).first()
+                            if analysis_record and analysis_record.ci_status in ['failed', 'error', 'timed_out', 'cancelled', 'action_required']:
+                                analysis_record.modify(
+                                    set__ci_status='resolved_by_user',
+                                    set__updated_at=datetime.utcnow()
+                                )
+                                logger.info(f"Webhook: Marked CiPrAnalysis for PR #{pr_number} in {repo_name} as 'resolved_by_user' due to successful check_run.")
+                    else:
+                        logger.warning(f"Webhook: (Check_run event) Could not find PR for commit {head_sha} in {repo_name}. Conclusion was {conclusion}.")
+                else:
+                    logger.warning(f"Webhook: (Check_run event) No connected repository or access token for {repo_name}. Conclusion was {conclusion}.")
+            return jsonify({'message': 'Check run event processed'}), 200
+
+        elif event_type == 'check_suite':
+            action = data.get('action')
+            check_suite = data.get('check_suite', {})
+            conclusion = check_suite.get('conclusion')
+            status = check_suite.get('status')
+            head_sha = check_suite.get('head_sha')
+            repo_data = data.get('repository', {})
+            repo_name = repo_data.get('full_name')
+            # Check suite itself doesn't have a direct html_url often, target_url might be on constituent check_runs
+
+            logger.info(f"Webhook: Check suite event: {action} for app {check_suite.get('app',{}).get('name')} on {repo_name} (status: {status}, conclusion: {conclusion})")
+
+            if action == 'completed' and head_sha and repo_name:
+                connected_repo = ConnectedRepository.objects(name=repo_name).first()
+                if connected_repo and connected_repo.user and connected_repo.user.github_access_token:
+                    access_token = connected_repo.user.github_access_token
+                    pr_details = asyncio.run(fetch_pr_details_for_commit(repo_name, head_sha, access_token))
+
+                    if pr_details:
+                        pr_number = pr_details.get('number')
+                        pr_id = str(pr_details.get('id'))
+                        pr_title = pr_details.get('title')
+                        pr_html_url = pr_details.get('html_url')
+                        app_name = check_suite.get('app', {}).get('name', 'Unknown App')
+
+                        if conclusion in ['failure', 'timed_out', 'cancelled', 'action_required']:
+                            logger.info(f"Webhook: CI failure (check_suite) for PR #{pr_number} in {repo_name}. App: {app_name}, Conclusion: {conclusion}")
+                            
+                            # Map incoming conclusion to a valid CiPrAnalysis.ci_status
+                            final_ci_status = 'failed' # Default for this block
+                            if conclusion == 'failure':
+                                final_ci_status = 'failure'
+                            elif conclusion in ['timed_out', 'cancelled', 'action_required']:
+                                final_ci_status = 'error' # Map these to 'error'
+                                
+                            CiPrAnalysis.objects(repository=connected_repo, pr_number=pr_number).modify(
+                                set__pr_id=pr_id,
+                                set__pr_title=pr_title,
+                                set__pr_html_url=pr_html_url,
+                                set__commit_sha=head_sha,
+                                set__ci_status=final_ci_status, # Use mapped status
+                                set__ci_failure_context=f"Suite: {app_name}",
+                                set__ci_failure_description=f"Check suite by '{app_name}' concluded with {conclusion}",
+                                add_to_set__ci_failure_details_list=f"Suite: {app_name} - {conclusion}",
+                                set__updated_at=datetime.utcnow(),
+                                upsert=True,
+                                set_on_insert__created_at=datetime.utcnow(),
+                                set_on_insert__analysis_status='not_started'
+                            )
+                            logger.info(f"Webhook: Upserted CiPrAnalysis for PR #{pr_number} in {repo_name} (suite conclusion '{conclusion}' as ci_status '{final_ci_status}').")
+                            
+                            # Trigger PR issue analysis for CI failure
+                            try:
+                                ci_analysis = CiPrAnalysis.objects(repository=connected_repo, pr_number=pr_number).first()
+                                if ci_analysis:
+                                    ci_analysis.add_log(f"Webhook: Preparing to analyze PR #{pr_number} for commit {head_sha[:7]}. Status: {ci_analysis.analysis_status}", "info")
+                                    ci_analysis.save() # Ensure this log is saved immediately
+
+                                    if ci_analysis.analysis_status == 'not_started':
+                                        ci_analysis.add_log(f"Webhook: Status is 'not_started'. Triggering PrIssueAnalyzer for PR #{pr_number}.", "info")
+                                        ci_analysis.save() # Save before passing to analyzer
+                                        logger.info(f"Webhook: Triggering PR issue analysis for CI failure in PR #{pr_number}")
+                                        pr_analyzer = PrIssueAnalyzer()
+                                        pr_analyzer.analyze_ci_failure(
+                                            pr_data=pr_details,
+                                            repository=connected_repo,
+                                            access_token=access_token,
+                                            initial_analysis_object=ci_analysis
+                                        )
+                                        logger.info(f"Webhook: Started PR issue analysis for PR #{pr_number}")
+                                    else:
+                                        ci_analysis.add_log(f"Webhook: Analysis status for PR #{pr_number} is '{ci_analysis.analysis_status}'. Analyzer not triggered.", "warning")
+                                        ci_analysis.save()
+                                else:
+                                    logger.error(f"Webhook: Could not find/create CiPrAnalysis object for PR #{pr_number} before triggering analyzer.")
+                            except Exception as e:
+                                logger.error(f"Error triggering PR issue analysis for PR #{pr_number}: {str(e)}")
+                                logger.error(traceback.format_exc())
+                        elif conclusion == 'success':
+                            logger.info(f"Webhook: CI success (check_suite) for PR #{pr_number} in {repo_name}. App: {app_name}")
+                            # If the whole suite is successful, it's a strong signal.
+                            analysis_record = CiPrAnalysis.objects(repository=connected_repo, pr_number=pr_number, commit_sha=head_sha).first()
+                            if analysis_record and analysis_record.ci_status in ['failed', 'error', 'timed_out', 'cancelled', 'action_required']:
+                                analysis_record.modify(
+                                    set__ci_status='resolved_by_user',
+                                    set__updated_at=datetime.utcnow()
+                                )
+                                logger.info(f"Webhook: Marked CiPrAnalysis for PR #{pr_number} in {repo_name} as 'resolved_by_user' due to successful check_suite.")
+                    else:
+                        logger.warning(f"Webhook: (Check_suite event) Could not find PR for commit {head_sha} in {repo_name}. Conclusion was {conclusion}.")
+                else:
+                    logger.warning(f"Webhook: (Check_suite event) No connected repository or access token for {repo_name}. Conclusion was {conclusion}.")
+            return jsonify({'message': 'Check suite event processed'}), 200
+        
         else:
             # Log unsupported event types
             logger.info(f"Received unsupported webhook event: {event_type}")
@@ -1148,9 +1424,9 @@ def get_github_repositories():
         access_token = session['user']['access_token']
         
         # Get user's repositories from GitHub
-        repos_resp = github.get('user/repos', token={'access_token': access_token})
-        if repos_resp.status_code != 200:
-            return jsonify({'error': 'Failed to fetch repositories'}), repos_resp.status_code
+        repos_resp = github_api_call('user/repos', access_token)
+        if not repos_resp or repos_resp.status_code != 200:
+            return jsonify({'error': 'Failed to fetch repositories'}), repos_resp.status_code if repos_resp else 500
             
         repos = repos_resp.json()
         
@@ -1184,9 +1460,36 @@ def repository_issues_updates(repo_name):
     def generate():
         last_update_time = datetime.now(pytz.UTC)
         last_issues_count = 0
+        last_ci_pr_analysis_count = 0 # Renamed from last_prs_count
+        # last_ci_pr_analysis_update_time = datetime.now(pytz.UTC) # To track last update time of CiPrAnalysis records
+
+        # Get user and connected_repo once, as they are needed for CiPrAnalysis query
+        user_id = session.get('user', {}).get('id')
+        if not user_id:
+            logger.error("SSE: User ID not found in session at stream start.")
+            error_payload = json.dumps({'error': 'User session invalid'})
+            yield f"data: {error_payload}\n\n"
+            return
+        
+        user = User.objects(id=user_id).first()
+        if not user:
+            logger.error(f"SSE: User {user_id} not found in DB at stream start.")
+            error_payload = json.dumps({'error': 'User not found'})
+            yield f"data: {error_payload}\n\n"
+            return
+
+        connected_repo = ConnectedRepository.objects(name=repo_name, user=user).first()
+        if not connected_repo:
+            logger.error(f"SSE: Connected repository {repo_name} for user {user.login} not found at stream start.")
+            error_payload = json.dumps({'error': 'Repository not connected'})
+            yield f"data: {error_payload}\n\n"
+            return
+        
+        logger.info(f"SSE: Stream started for {repo_name} by user {user.login}")
         
         while True:
-            if 'user' not in session:
+            if 'user' not in session: # Re-check session validity periodically
+                logger.warning(f"SSE: Session ended for {repo_name}. Stopping stream.")
                 break
                 
             try:
@@ -1195,45 +1498,77 @@ def repository_issues_updates(repo_name):
                 # Query for 'RepoPilot help' issues
                 query_params = {
                     'labels': 'RepoPilot help',
-                    'per_page': 100  # Increased to get more issues
+                    'per_page': 100
                 }
+                issues_resp = github_api_call(f'repos/{repo_name}/issues', access_token, params=query_params)
+                issues = issues_resp.json() if issues_resp and issues_resp.status_code == 200 else []
+                current_issues_count = len(issues)
+
+                # Fetch failed CI PRs from CiPrAnalysis records
+                # Only fetch records with ci_status indicating failure or error
+                failed_ci_pr_analyses = CiPrAnalysis.objects(
+                    repository=connected_repo, 
+                    ci_status__in=['failed', 'error']
+                ).order_by('-updated_at')
                 
-                issues_resp = github.get(f'repos/{repo_name}/issues', 
-                                        token={'access_token': access_token}, 
-                                        params=query_params)
+                current_ci_pr_analysis_count = failed_ci_pr_analyses.count()
+                # newest_ci_pr_update = failed_ci_pr_analyses.first().updated_at if current_ci_pr_analysis_count > 0 else last_ci_pr_analysis_update_time
                 
-                if issues_resp.status_code != 200:
-                    time.sleep(10)  # Wait before retrying
-                    continue
-                    
-                issues = issues_resp.json()
-                current_count = len(issues)
-                
-                # Check if we have any new issues or updates
-                newest_update = last_update_time
+                # Convert to list of dicts for sending
+                failed_ci_prs_for_template = [record.to_dict() for record in failed_ci_pr_analyses]
+                # Ensure fields expected by template are present
+                for pr_dict in failed_ci_prs_for_template:
+                    if 'head' in pr_dict and isinstance(pr_dict['head'], dict) and 'ref' in pr_dict['head']:
+                        pr_dict['branch_name'] = pr_dict['head']['ref']
+                    # Add other necessary fields if not directly from to_dict(), similar to repository_issues route
+                    if 'title' not in pr_dict and 'pr_title' in pr_dict: pr_dict['title'] = pr_dict['pr_title']
+                    if 'number' not in pr_dict and 'pr_number' in pr_dict: pr_dict['number'] = pr_dict['pr_number']
+                    if 'html_url' not in pr_dict and 'pr_html_url' in pr_dict: pr_dict['html_url'] = pr_dict['pr_html_url']
+                    if 'base' not in pr_dict: pr_dict['base'] = {'ref': 'unknown'} # Default if missing
+                    if 'user' not in pr_dict: pr_dict['user'] = {'login': 'unknown'} # Default if missing
+                    if 'labels' not in pr_dict: pr_dict['labels'] = [] # Default if missing
+
+                # Check if issues have updated
+                newest_issue_update = last_update_time
                 for issue in issues:
-                    issue_updated = datetime.fromisoformat(issue['updated_at'].replace('Z', '+00:00'))
-                    if issue_updated > newest_update:
-                        newest_update = issue_updated
+                    issue_updated_at = datetime.fromisoformat(issue['updated_at'].replace('Z', '+00:00'))
+                    if issue_updated_at > newest_issue_update:
+                        newest_issue_update = issue_updated_at
                 
-                if newest_update > last_update_time or current_count != last_issues_count:
-                    # Send the updated issues list
+                # Determine if there's a change to send
+                # For simplicity, we'll check counts. A more robust check would be last updated_at of CiPrAnalysis.
+                should_send_update = (
+                    newest_issue_update > last_update_time or 
+                    current_issues_count != last_issues_count or
+                    current_ci_pr_analysis_count != last_ci_pr_analysis_count
+                )
+
+                if should_send_update:
+                    logger.info(f"SSE: Sending update for {repo_name}. Issues: {current_issues_count}, Failed CI PRs: {current_ci_pr_analysis_count}")
                     update_data = {
-                        'issues': issues
+                        'issues': issues,
+                        'failed_ci_prs': failed_ci_prs_for_template
                     }
-                    
                     yield f"data: {json.dumps(update_data)}\n\n"
                     
-                    # Update tracking variables
-                    last_update_time = newest_update
-                    last_issues_count = current_count
+                    last_update_time = newest_issue_update
+                    last_issues_count = current_issues_count
+                    last_ci_pr_analysis_count = current_ci_pr_analysis_count
+                    # last_ci_pr_analysis_update_time = newest_ci_pr_update
                 
-                time.sleep(5)  # Poll every 5 seconds
+                time.sleep(30) # Poll every 30 seconds
                 
             except Exception as e:
-                logger.error(f"Error in repository issues SSE stream: {str(e)}")
-                time.sleep(5)  # Wait before retrying
-    
+                logger.error(f"Error in repository issues SSE stream for {repo_name}: {str(e)}")
+                logger.error(traceback.format_exc())
+                # If specific errors like session expiry, break or handle gracefully
+                if isinstance(e, (KeyError, AttributeError)) and "session" in str(e).lower():
+                    logger.warning(f"SSE: Session related error for {repo_name}. Stopping stream.")
+                    break
+                time.sleep(15) # Longer sleep on general error
+        
+        logger.info(f"SSE: Stream ended for {repo_name} by user {user.login if user else 'unknown'}")
+
     return Response(
         stream_with_context(generate()),
         mimetype='text/event-stream',
@@ -1254,51 +1589,81 @@ def repository_issues(repo_name):
             session.clear()
             return redirect(url_for('login'))
         
-        # Get repository details from GitHub
         access_token = session['user']['access_token']
         repo_resp = github_api_call(f'repos/{repo_name}', access_token)
         
         if not repo_resp or repo_resp.status_code != 200:
             flash('Repository not found or no access', 'error')
             return redirect(url_for('dashboard'))
-            
-        repo_data = repo_resp.json()
+        repo_data_for_template = repo_resp.json()
         
-        # Always filter by 'RepoPilot help' label
-        query_params = {
-            'state': 'open',
-            'labels': 'RepoPilot help'
-        }
-            
-        # Use our github_api_call function with retry logic
-        issues_resp = github_api_call(f'repos/{repo_name}/issues', access_token, params=query_params)
-        
-        if not issues_resp or issues_resp.status_code != 200:
-            flash('Failed to fetch issues', 'error')
-            return redirect(url_for('dashboard'))
-            
-        issues = issues_resp.json()
-        
-        # Check if this repository is connected
-        repository = ConnectedRepository.objects(user=user, name=repo_name).first()
-        
-        if repository:
-            # Get default requirements for this repository
+        connected_repo = ConnectedRepository.objects(name=repo_name, user=user).first()
+        if not connected_repo:
+            # If not connected, create it now. This is important for CiPrAnalysis records.
             try:
-                requirements = _get_default_requirements(github, repo_name, access_token)
-            except:
-                requirements = None
+                connected_repo = ConnectedRepository.objects.create(
+                    user=user,
+                    github_repo_id=str(repo_data_for_template['id']),
+                    name=repo_name,
+                    description=repo_data_for_template.get('description', ''),
+                    is_private=repo_data_for_template['private']
+                )
+                logger.info(f"Repository Issues: Implicitly connected repository {repo_name} for user {user.login}")
+            except Exception as e_create_repo:
+                logger.error(f"Failed to implicitly connect repository {repo_name}: {e_create_repo}")
+                flash(f'Error connecting to repository {repo_name}. Please try connecting it from the dashboard.', 'error')
+                return redirect(url_for('dashboard'))
+
+        # Fetch "RepoPilot help" issues
+        issues_query_params = {
+            'state': 'open',
+            'labels': 'RepoPilot help' # Assuming this is the label for issues RepoPilot should look at
+        }
+        issues_resp = github_api_call(f'repos/{repo_name}/issues', access_token, params=issues_query_params)
+        issues = issues_resp.json() if issues_resp and issues_resp.status_code == 200 else []
+        
+        # Fetch failed CI PRs from CiPrAnalysis records
+        failed_ci_pr_analyses = CiPrAnalysis.objects(repository=connected_repo, ci_status__in=['failed', 'error']).order_by('-updated_at')
+        failed_ci_prs_for_template = [record.to_dict() for record in failed_ci_pr_analyses]
+        # Ensure fields expected by template are present (like 'branch_name' from head.ref if not directly on model)
+        for pr_dict in failed_ci_prs_for_template:
+            if 'head' in pr_dict and isinstance(pr_dict['head'], dict) and 'ref' in pr_dict['head']:
+                 pr_dict['branch_name'] = pr_dict['head']['ref']
+            else: # Attempt to fetch live if missing, or set a default
+                live_pr_resp = github_api_call(f'repos/{repo_name}/pulls/{pr_dict["pr_number"]}', access_token)
+                if live_pr_resp and live_pr_resp.status_code == 200:
+                    live_pr_data = live_pr_resp.json()
+                    pr_dict['branch_name'] = live_pr_data.get('head',{}).get('ref', 'unknown_branch')
+                    pr_dict['base'] = live_pr_data.get('base', {})
+                    pr_dict['user'] = live_pr_data.get('user', {})
+                    pr_dict['labels'] = live_pr_data.get('labels', [])
+                else:
+                    pr_dict['branch_name'] = 'unknown_branch'
+                    pr_dict['base'] = {'ref': 'unknown'}
+                    pr_dict['user'] = {'login': 'unknown'}
+                    pr_dict['labels'] = []
+            # Ensure title for display is present
+            if 'title' not in pr_dict and 'pr_title' in pr_dict:
+                pr_dict['title'] = pr_dict['pr_title']
+            if 'number' not in pr_dict and 'pr_number' in pr_dict:
+                 pr_dict['number'] = pr_dict['pr_number']
+            if 'html_url' not in pr_dict and 'pr_html_url' in pr_dict:
+                pr_dict['html_url'] = pr_dict['pr_html_url']
+
+        logger.info(f"Returning {len(issues)} issues and {len(failed_ci_prs_for_template)} failed CI PRs for {repo_name}")
         
         return render_template(
             'repository_issues.html',
-            user=session['user'],
-            repository=repo_data,
-            issues=issues
+            user=user.to_dict(), # Pass user as dict
+            repository=repo_data_for_template, # Original GitHub repo data for header
+            issues=issues,
+            failed_ci_prs=failed_ci_prs_for_template # List of dicts from CiPrAnalysis
         )
         
     except Exception as e:
-        logger.error(f"Error fetching repository issues: {str(e)}")
+        logger.error(f"Error fetching repository issues for {repo_name}: {str(e)}")
         logger.error(traceback.format_exc())
+        flash('An error occurred while loading repository information.', 'error')
         return redirect(url_for('dashboard'))
 
 def get_issue_data(repo_name, issue_number, access_token):
@@ -1432,13 +1797,13 @@ def issue_updates(repo_name, issue_number):
                 current_status = current_analysis_state.get('analysis_status', 'unknown')
                 if current_status in ['in_progress', 'pending']:
                     # More frequent polling during active analysis
-                    time.sleep(1)  # Poll every 1 second during active analysis
+                    time.sleep(3)  # Poll every 3 seconds during active analysis
                 elif current_status in ['completed', 'failed']:
                     # Less frequent polling when analysis is done
-                    time.sleep(5)  # Poll every 5 seconds when completed/failed
+                    time.sleep(10)  # Poll every 10 seconds when completed/failed
                 else:
                     # Default polling frequency
-                    time.sleep(2)  # Poll every 2 seconds (default)
+                    time.sleep(5)  # Poll every 5 seconds (default)
                 
             except Exception as e:
                 logger.error(f"SSE: Error in stream loop for {repo_name}/{issue_number}: {str(e)}")
@@ -1622,6 +1987,143 @@ def issue_details(repo_name, issue_number):
         logger.error(traceback.format_exc())
         flash(f'Error loading issue details: {str(e)}', 'error')
         return redirect(url_for('dashboard'))
+
+@app.route('/repository/<path:repo_name>/ci-fix/<int:pr_number>')
+def ci_fix_details(repo_name, pr_number):
+    if 'user' not in session:
+        return redirect(url_for('login'))
+
+    try:
+        user = User.objects(id=session['user']['id']).first()
+        if not user:
+            session.clear()
+            return redirect(url_for('login'))
+
+        access_token = session['user']['access_token']
+
+        connected_repo = ConnectedRepository.objects(name=repo_name, user=user).first()
+        if not connected_repo:
+            flash(f'Repository {repo_name} is not connected to your account.', 'error')
+            return redirect(url_for('dashboard'))
+
+        # 1. Fetch Live PR Data First
+        live_pr_details_resp = github_api_call(f'repos/{repo_name}/pulls/{pr_number}', access_token)
+        if not live_pr_details_resp or live_pr_details_resp.status_code != 200:
+            flash(f'Pull Request #{pr_number} in {repo_name} not found or could not be fetched.', 'error')
+            return redirect(url_for('repository_issues', repo_name=repo_name))
+        live_pr_details = live_pr_details_resp.json()
+
+        analysis_to_process = None
+        should_trigger_analysis = False
+        initial_log_for_template = []
+
+        try:
+            # 2. Attempt to Create CiPrAnalysis
+            analysis_to_process = CiPrAnalysis.objects.create(
+                repository=connected_repo,
+                pr_number=live_pr_details['number'],
+                pr_id=str(live_pr_details['id']),
+                pr_title=live_pr_details['title'],
+                pr_html_url=live_pr_details['html_url'],
+                commit_sha=live_pr_details['head']['sha'],
+                ci_status='failed', # Default, webhooks will update if different
+                analysis_status='not_started',
+                ci_failure_context='Analysis initiated from page view',
+                analysis_logs=[{'timestamp': datetime.utcnow().isoformat(), 'message': f'New CI PR Analysis record created (ID: temp) for PR #{pr_number} by page view.', 'type': 'info'}]
+            )
+            # Update the temporary ID in the log message after save
+            analysis_to_process.analysis_logs[0]['message'] = f'New CI PR Analysis record created (ID: {str(analysis_to_process.id)}) for PR #{pr_number} by page view.'
+            analysis_to_process.save() # Save again to update the log message with real ID
+            
+            logger.info(f"CI Fix Page: Created new CiPrAnalysis record {analysis_to_process.id} for PR #{pr_number}.")
+            should_trigger_analysis = True # New records should always attempt to trigger if not_started
+        except NotUniqueError:
+            # 3. Handle Existing Record
+            logger.info(f"CI Fix Page: CiPrAnalysis record for PR #{pr_number} already exists. Fetching it.")
+            analysis_to_process = CiPrAnalysis.objects(repository=connected_repo, pr_number=pr_number).first()
+            if not analysis_to_process: # Should not happen if NotUniqueError was raised
+                logger.error(f"CI Fix Page: NotUniqueError but failed to fetch existing analysis for PR #{pr_number}.")
+                flash('Error retrieving CI analysis details.', 'error')
+                return redirect(url_for('repository_issues', repo_name=repo_name))
+            # For existing records, trigger only if it's 'not_started'
+            if analysis_to_process.analysis_status == 'not_started':
+                should_trigger_analysis = True
+        except Exception as e_create_fetch:
+            logger.error(f"CI Fix Page: Error creating or fetching CiPrAnalysis for PR #{pr_number}: {e_create_fetch}")
+            logger.error(traceback.format_exc())
+            flash('Error preparing CI analysis details.', 'error')
+            return redirect(url_for('repository_issues', repo_name=repo_name))
+
+        # Add page load message to initial logs for the template
+        page_load_log_msg = f"Page loaded. CI PR Analysis ID: {str(analysis_to_process.id)}, Status: {analysis_to_process.analysis_status}."
+        initial_log_for_template.append({
+            'timestamp': datetime.utcnow().isoformat(), 
+            'message': page_load_log_msg, 
+            'type': 'info'
+        })
+
+        # 5. Check if Analysis Should Be Triggered
+        if should_trigger_analysis:
+            trigger_attempt_log_msg = f"Page view: Status is 'not_started'. Attempting to trigger analysis for PR #{pr_number} (ID: {str(analysis_to_process.id)})."
+            logger.info(trigger_attempt_log_msg)
+            analysis_to_process.add_log(trigger_attempt_log_msg, "info") # Log added to object in memory
+            # REMOVED: analysis_to_process.save()
+            initial_log_for_template.append({'timestamp': datetime.utcnow().isoformat(), 'message': trigger_attempt_log_msg, 'type': 'info'}) # Log for current page view
+            
+            try:
+                pr_analyzer = PrIssueAnalyzer()
+                pr_analyzer.analyze_ci_failure(
+                    pr_data=live_pr_details, # Use fresh live data
+                    repository=connected_repo,
+                    access_token=access_token,
+                    initial_analysis_object=analysis_to_process # Pass the DB object (with in-memory log addition)
+                )
+                logger.info(f"Page view: Call to analyze_ci_failure for PR #{pr_number} (ID: {str(analysis_to_process.id)}) completed.")
+            except Exception as e_trigger:
+                error_log_msg = f"Page view: Error attempting to trigger analysis for PR #{pr_number} (ID: {str(analysis_to_process.id)}): {str(e_trigger)}"
+                logger.error(error_log_msg)
+                logger.error(traceback.format_exc())
+                analysis_to_process.add_log(error_log_msg, "error") # Log added to object in memory
+                # REMOVED: analysis_to_process.save()
+                initial_log_for_template.append({'timestamp': datetime.utcnow().isoformat(), 'message': error_log_msg, 'type': 'error'})
+        else:
+            already_active_log_msg = f"Page view: Analysis for PR #{pr_number} (ID: {str(analysis_to_process.id)}) has status '{analysis_to_process.analysis_status}'. Not re-triggering from page view."
+            logger.info(already_active_log_msg)
+            # Don't add this to DB logs unless it's a significant event, but okay for template
+            initial_log_for_template.append({'timestamp': datetime.utcnow().isoformat(), 'message': already_active_log_msg, 'type': 'info'})
+
+        # 6. Prepare pr_data_for_template
+        pr_data_for_template = analysis_to_process.to_dict()
+        # Combine initial logs with existing logs from DB for the template
+        pr_data_for_template['analysis_logs'] = initial_log_for_template + (pr_data_for_template.get('analysis_logs', []) or [])
+        
+        # Augment with any other live data needed for display that might not be on CiPrAnalysis or could be stale
+        pr_data_for_template['body'] = live_pr_details.get('body', pr_data_for_template.get('pr_body')) 
+        pr_data_for_template['labels'] = live_pr_details.get('labels', pr_data_for_template.get('labels', []))
+        pr_data_for_template['state'] = live_pr_details.get('state', pr_data_for_template.get('state', 'unknown'))
+        pr_data_for_template['user'] = live_pr_details.get('user', pr_data_for_template.get('user'))
+        pr_data_for_template['head'] = live_pr_details.get('head', pr_data_for_template.get('head'))
+        pr_data_for_template['base'] = live_pr_details.get('base', pr_data_for_template.get('base'))
+        # Ensure fields used by template from pr_data.X (like pr_data.title) are present
+        # CiPrAnalysis.to_dict() should already provide pr_title, pr_html_url, pr_number as top-level keys.
+        # If live_pr_details has more up-to-date versions of these, you can override them here.
+        # e.g., pr_data_for_template['pr_title'] = live_pr_details.get('title', pr_data_for_template.get('pr_title'))
+
+        comments_resp = github_api_call(f'repos/{repo_name}/issues/{pr_number}/comments', access_token)
+        pr_data_for_template['comments'] = comments_resp.json() if comments_resp and comments_resp.status_code == 200 else []
+        
+        # 7. Render Template
+        return render_template('ci_fix_details.html',
+                               repository=connected_repo.to_dict(), 
+                               pr_data=pr_data_for_template,
+                               user=user.to_dict()
+                              )
+
+    except Exception as e:
+        logger.error(f"Error in ci_fix_details route for PR #{pr_number} in {repo_name}: {str(e)}")
+        logger.error(traceback.format_exc())
+        flash(f'Error loading CI-Fix details: {str(e)}', 'error')
+        return redirect(url_for('repository_issues', repo_name=repo_name))
 
 async def trigger_issue_analysis(repository, issue_data, requirements=None, access_token=None, initial_analysis_object=None):
     """Trigger issue analysis in the background using the IssueAnalyzer"""
@@ -1916,6 +2418,315 @@ def analyze_issue_api(repo_name, issue_number):
         logger.error(f"Error in /api/analyze-issue endpoint for {repo_name}/{issue_number}: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'error': f'Failed to trigger analysis: {str(e)}'}), 500
+
+async def check_ci_status(repo_name, head_sha, access_token):
+    """
+    Comprehensive CI status checking using both Status API and Checks API
+    Returns (has_failed_ci, failure_details)
+    """
+    has_failed_ci = False
+    failure_details = []
+    
+    try:
+        # First, try the Status API (most commonly used)
+        status_resp = github_api_call(f'repos/{repo_name}/commits/{head_sha}/status', access_token, 
+                                    initial_retry_delay=1, max_retries=3)
+        
+        if status_resp and status_resp.status_code == 200:
+            status_data = status_resp.json()
+            logger.debug(f"Status API response for {repo_name}/{head_sha}: state={status_data.get('state')}, {len(status_data.get('statuses', []))} statuses")
+            
+            # Check individual statuses first
+            for status in status_data.get('statuses', []):
+                context = status.get('context', '').lower()
+                state = status.get('state', '')
+                
+                # Expanded CI detection patterns (prioritized for common systems)
+                ci_patterns = [
+                    'circle', 'circleci',  # CircleCI first since user mentioned it
+                    'ci/', 'ci-', 'continuous-integration',
+                    'test', 'tests', 'testing', 
+                    'build', 'lint', 'check',
+                    'travis', 'jenkins', 'github-actions', 'azure', 'gitlab',
+                    'appveyor', 'codecov', 'coverage'
+                ]
+                
+                if state == 'failure' and any(pattern in context for pattern in ci_patterns):
+                    has_failed_ci = True
+                    failure_details.append(f"Status: {context} failed")
+                    logger.info(f"Found failed CI status: {context} = {state}")
+            
+            # Check combined status - only if we have CI-related statuses
+            combined_state = status_data.get('state')
+            if combined_state == 'failure' and not has_failed_ci:
+                ci_statuses = [s for s in status_data.get('statuses', []) 
+                             if any(pattern in s.get('context', '').lower() 
+                                   for pattern in ['ci', 'circle', 'test', 'build', 'check'])]
+                if ci_statuses:
+                    has_failed_ci = True
+                    failure_details.append(f"Status: Combined CI failure")
+                    logger.info(f"Combined status failed with CI contexts: {[s.get('context') for s in ci_statuses]}")
+        
+        # Only check Checks API if Status API didn't find failures (to save API calls)
+        if not has_failed_ci:
+            checks_resp = github_api_call(f'repos/{repo_name}/commits/{head_sha}/check-runs', access_token,
+                                        initial_retry_delay=1, max_retries=2)
+            
+            if checks_resp and checks_resp.status_code == 200:
+                checks_data = checks_resp.json()
+                logger.debug(f"Checks API response for {repo_name}/{head_sha}: {len(checks_data.get('check_runs', []))} check runs")
+                
+                for check_run in checks_data.get('check_runs', []):
+                    name = check_run.get('name', '').lower()
+                    status = check_run.get('status', '')
+                    conclusion = check_run.get('conclusion', '')
+                    
+                    # Check for failed or cancelled checks
+                    if conclusion in ['failure', 'cancelled', 'timed_out'] or status == 'failed':
+                        # Common CI/test check patterns
+                        ci_check_patterns = [
+                            'ci', 'test', 'build', 'lint', 'check', 'verify',
+                            'compile', 'integration', 'unit', 'coverage',
+                            'security', 'quality'
+                        ]
+                        
+                        if any(pattern in name for pattern in ci_check_patterns):
+                            has_failed_ci = True
+                            failure_details.append(f"Check: {check_run.get('name')} {conclusion or status}")
+                            logger.info(f"Found failed CI check: {check_run.get('name')} = {conclusion or status}")
+                            break  # Found a failure, no need to check more
+        
+        # Only check Check Suites if both Status and Checks APIs didn't find failures
+        if not has_failed_ci:
+            suites_resp = github_api_call(f'repos/{repo_name}/commits/{head_sha}/check-suites', access_token,
+                                        initial_retry_delay=1, max_retries=2)
+            
+            if suites_resp and suites_resp.status_code == 200:
+                suites_data = suites_resp.json()
+                logger.debug(f"Check Suites API response for {repo_name}/{head_sha}: {len(suites_data.get('check_suites', []))} suites")
+                
+                for suite in suites_data.get('check_suites', []):
+                    conclusion = suite.get('conclusion', '')
+                    app_name = suite.get('app', {}).get('name', '').lower()
+                    
+                    if conclusion in ['failure', 'cancelled', 'timed_out']:
+                        # Common CI app patterns
+                        ci_app_patterns = [
+                            'circleci', 'travis', 'jenkins', 'github-actions',
+                            'azure', 'gitlab', 'appveyor', 'buildkite'
+                        ]
+                        
+                        if any(pattern in app_name for pattern in ci_app_patterns):
+                            has_failed_ci = True
+                            failure_details.append(f"Suite: {app_name} {conclusion}")
+                            logger.info(f"Found failed CI suite: {app_name} = {conclusion}")
+                            break  # Found a failure, no need to check more
+        
+        if has_failed_ci:
+            logger.info(f"CI failure detected for {repo_name}/{head_sha}: {failure_details}")
+        else:
+            logger.debug(f"No CI failures found for {repo_name}/{head_sha}")
+            
+        return has_failed_ci, failure_details
+        
+    except Exception as e:
+        logger.error(f"Error checking CI status for {repo_name}/{head_sha}: {str(e)}")
+        return False, []
+
+@app.route('/debug/ci-status/<path:repo_name>/<int:pr_number>')
+def debug_ci_status(repo_name, pr_number):
+    """Debug route to test CI status detection for a specific PR"""
+    if 'user' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    try:
+        access_token = session['user']['access_token']
+        
+        # Get PR details
+        pr_resp = github_api_call(f'repos/{repo_name}/pulls/{pr_number}', access_token)
+        if not pr_resp or pr_resp.status_code != 200:
+            return jsonify({'error': 'PR not found'}), 404
+        
+        pr_data = pr_resp.json()
+        head_sha = pr_data['head']['sha']
+        
+        # Check CI status
+        has_failed_ci, failure_details = asyncio.run(check_ci_status(repo_name, head_sha, access_token))
+        
+        # Also get raw API responses for debugging
+        status_resp = github_api_call(f'repos/{repo_name}/commits/{head_sha}/status', access_token)
+        checks_resp = github_api_call(f'repos/{repo_name}/commits/{head_sha}/check-runs', access_token)
+        suites_resp = github_api_call(f'repos/{repo_name}/commits/{head_sha}/check-suites', access_token)
+        
+        return jsonify({
+            'repo': repo_name,
+            'pr_number': pr_number,
+            'head_sha': head_sha,
+            'has_failed_ci': has_failed_ci,
+            'failure_details': failure_details,
+            'raw_apis': {
+                'status': status_resp.json() if status_resp and status_resp.status_code == 200 else None,
+                'checks': checks_resp.json() if checks_resp and checks_resp.status_code == 200 else None,
+                'check_suites': suites_resp.json() if suites_resp and suites_resp.status_code == 200 else None
+            }
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in debug CI status route: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+# Removed CircleCI API functions - using webhooks instead
+
+# In-memory store for failed CI PRs is now replaced by CiPrAnalysis model in the database
+# Old functions add_failed_ci_pr, get_failed_ci_prs, remove_failed_ci_pr are removed.
+
+async def fetch_pr_details_for_commit(repo_name, commit_sha, access_token):
+    """Fetch PR details for a given commit SHA"""
+    try:
+        # Search for PRs that contain this commit
+        prs_resp = github_api_call(f'repos/{repo_name}/pulls', access_token, params={'state': 'open'})
+        
+        if not prs_resp or prs_resp.status_code != 200:
+            return None
+            
+        prs = prs_resp.json()
+        
+        # Find PR that matches this commit
+        for pr in prs:
+            if pr['head']['sha'] == commit_sha:
+                return {
+                    'id': pr['id'],
+                    'number': pr['number'],
+                    'title': pr['title'],
+                    'body': pr.get('body', ''),
+                    'state': pr['state'],
+                    'user': pr['user'],
+                    'created_at': pr['created_at'],
+                    'updated_at': pr['updated_at'],
+                    'head': pr['head'],
+                    'base': pr['base'],
+                    'branch_name': pr['head']['ref'],
+                    'type': 'pull_request',
+                    'html_url': pr['html_url'],
+                    'labels': pr.get('labels', []),
+                    'ci_failure_details': []  # Will be populated by webhook
+                }
+        
+        return None
+        
+    except Exception as e:
+        logger.error(f"Error fetching PR details for commit {commit_sha}: {str(e)}")
+        return None
+
+@app.route('/api/refresh-ci-failures/<path:repo_name>', methods=['GET', 'POST'])
+def refresh_ci_failures(repo_name):
+    if 'user' not in session:
+        return jsonify({'error': 'Unauthorized'}), 401
+    
+    try:
+        access_token = session['user']['access_token']
+        user = User.objects(id=session['user']['id']).first()
+        if not user:
+            return jsonify({'error': 'User not found for session'}), 401
+
+        connected_repo = ConnectedRepository.objects(name=repo_name, user=user).first()
+        if not connected_repo:
+            # If not connected for this user, try to find it generally or create if accessible by app
+            # This part might need more sophisticated logic if a repo can be accessed by app but not yet connected to a specific user
+            repo_resp_check = github_api_call(f'repos/{repo_name}', access_token) # Check general accessibility
+            if not repo_resp_check or repo_resp_check.status_code != 200:
+                 return jsonify({'error': f'Repository {repo_name} not found or not accessible.'}), 404
+            repo_data_for_db = repo_resp_check.json()
+            # Attempt to create a ConnectedRepository instance if it truly doesn't exist for this user
+            # This assumes the user has rights to connect it, or it's a public repo.
+            try:
+                connected_repo = ConnectedRepository.objects.create(
+                    user=user,
+                    github_repo_id=str(repo_data_for_db['id']),
+                    name=repo_name,
+                    description=repo_data_for_db.get('description', ''),
+                    is_private=repo_data_for_db['private']
+                )
+                logger.info(f"Refresh CI: Implicitly connected repository {repo_name} for user {user.login}")
+            except NotUniqueError: # Should not happen if the initial query was user-specific
+                connected_repo = ConnectedRepository.objects(name=repo_name, user=user).first()
+            except Exception as e_create:
+                logger.error(f"Refresh CI: Error creating ConnectedRepository for {repo_name}: {e_create}")
+                return jsonify({'error': f'Could not establish repository connection for {repo_name}'}), 500
+        
+        if not connected_repo: # Final check
+            return jsonify({'error': f'Failed to connect to repository {repo_name} for CI refresh.'}), 500
+
+        prs_resp = github_api_call(f'repos/{repo_name}/pulls', access_token, params={'state': 'open'})
+        if not prs_resp or prs_resp.status_code != 200:
+            return jsonify({'error': 'Failed to fetch PRs'}), 500
+        
+        prs = prs_resp.json()
+        processed_failed_prs = []
+        
+        for pr_summary in prs:
+            head_sha = pr_summary['head']['sha']
+            pr_number = pr_summary['number']
+            pr_id = str(pr_summary['id'])
+            pr_title = pr_summary['title']
+            pr_html_url = pr_summary['html_url']
+
+            has_failed_ci, failure_details_list = asyncio.run(check_ci_status(repo_name, head_sha, access_token))
+            
+            if has_failed_ci:
+                # Assuming failure_details_list contains strings. Take the first one for context/description for now.
+                # More sophisticated parsing of failure_details_list might be needed.
+                failure_context = "CI Failure"
+                failure_description = failure_details_list[0] if failure_details_list else "Unknown CI failure"
+                # Try to get a target_url from one of the failure details if possible (heuristic)
+                target_url = next((detail.split('Target URL: ')[1] for detail in failure_details_list if 'Target URL: ' in detail), None)
+                if not target_url: # Fallback if no explicit target URL found in details.
+                     # Try to get it from the PR's checks API if it was a check run/suite related failure
+                    # This part can be complex, for now, we'll rely on what check_ci_status provides or leave it blank
+                    pass 
+
+                CiPrAnalysis.objects(repository=connected_repo, pr_number=pr_number).modify(
+                    set__pr_id=pr_id,
+                    set__pr_title=pr_title,
+                    set__pr_html_url=pr_html_url,
+                    set__commit_sha=head_sha,
+                    set__ci_status='failed', 
+                    set__ci_failure_context=failure_context, # Or derive more specifically
+                    set__ci_failure_description=failure_description,
+                    set__ci_failure_details_list=failure_details_list,
+                    set__ci_target_url=target_url if target_url else pr_html_url, # Fallback to PR URL
+                    set__updated_at=datetime.utcnow(),
+                    upsert=True,
+                    set_on_insert__created_at=datetime.utcnow(),
+                    set_on_insert__analysis_status='not_started'
+                )
+                logger.info(f"Refresh CI: Upserted CiPrAnalysis for failed PR #{pr_number} in {repo_name}")
+                # Append data for the JSON response
+                processed_failed_prs.append({
+                    'pr_number': pr_number, 
+                    'title': pr_title, 
+                    'ci_status': 'failed',
+                    'details': failure_details_list
+                })
+            else:
+                # If CI is not failing for this open PR, ensure any old 'failed' record is marked resolved.
+                existing_failure = CiPrAnalysis.objects(repository=connected_repo, pr_number=pr_number, ci_status__in=['failed', 'error']).first()
+                if existing_failure:
+                    existing_failure.modify(set__ci_status='resolved_by_user', set__updated_at=datetime.utcnow())
+                    logger.info(f"Refresh CI: Marked PR #{pr_number} in {repo_name} as resolved (was failed, now passing).")
+            
+            time.sleep(0.5) # Add a small delay to space out API calls for each PR
+        
+        return jsonify({
+            'status': 'success',
+            'message': f'{len(processed_failed_prs)} PRs found with current CI failures and processed.',
+            'failed_prs_processed': processed_failed_prs
+        })
+        
+    except Exception as e:
+        logger.error(f"Error refreshing CI failures for {repo_name}: {str(e)}")
+        logger.error(traceback.format_exc())
+        return jsonify({'error': f'Failed to refresh CI failures: {str(e)}'}), 500
 
 if __name__ == '__main__':
     logger.info("Starting Flask app on http://localhost:5001")

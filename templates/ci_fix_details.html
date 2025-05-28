@@ -1,0 +1,407 @@
+{% extends "base.html" %}
+
+{% block title %}{{ pr_data.pr_title | default(pr_data.title, true) }} - PR #{{ pr_data.pr_number | default(pr_data.number, true) }} (CI Failed){% endblock %}
+
+{% block head %}
+    {{ super() }} 
+    <meta name="repository-name" content="{{ repository.name }}">
+    <meta name="pr-number" content="{{ pr_data.pr_number | default(pr_data.number, true) }}">
+    {# Link to dashboard.css if it provides any BASE styles for .dashboard-container etc. that are not in style.css from base.html #}
+    {# <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}"> #}
+{% endblock %}
+
+{% block styles %}
+<style>
+    /* Copied verbatim from issue_details.html style block */
+    * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+    }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        height: 100vh;
+        margin: 0;
+        padding: 0;
+        overflow: hidden; /* This was in issue_details, might be important */
+    }
+    .dashboard-container {
+        display: flex;
+        height: 100vh;
+    }
+    .sidebar {
+        width: 250px;
+        min-width: 250px;
+        background-color: #2f3136; /* <<< THE DESIRED DASHBOARD SIDEBAR COLOR */
+        border-right: 1px solid #26282c;
+        height: 100vh;
+        color: #dcddde;
+        display: flex;
+        flex-direction: column;
+    }
+    .user-profile { padding: 20px; text-align: center; border-bottom: 1px solid #26282c; background-color: #2f3136; }
+    .avatar { width: 80px; height: 80px; border-radius: 50%; margin-bottom: 10px; border: 2px solid #dcddde; }
+    .user-profile h3 { margin: 10px 0 5px; color: #ffffff; }
+    .user-profile p { color: #dcddde; font-size: 0.9em; }
+    .sidebar-nav { display: flex; flex-direction: column; padding: 10px 0; }
+    .nav-link { display: flex; align-items: center; padding: 12px 20px; color: #dcddde; text-decoration: none; transition: all 0.3s ease; border-left: 3px solid transparent; }
+    .nav-link i { margin-right: 10px; width: 20px; text-align: center; }
+    .nav-link.active { background-color: #393c43; color: #ffffff; border-left-color: #7289da; }
+    .nav-link:hover:not(.active) { background-color: #36393f; border-left-color: #dcddde; }
+    .nav-link.logout { margin-top: auto; color: #ed4245; border-top: 1px solid #26282c; }
+    .nav-link.logout:hover { background-color: #ed4245; color: white; }
+    .main-content { flex: 1; background-color: #fff; position: relative; display: flex; flex-direction: column; overflow: hidden; }
+    .content-wrapper { flex: 1; overflow-y: auto; padding: 20px; padding-bottom: 80px; /* Extra padding for footer */ }
+    
+    /* Footer styles */
+    .footer {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        background-color: #ffffff;
+        color: #666666;
+        padding: 15px 20px;
+        text-align: center;
+        font-size: 0.9em;
+        border-top: 1px solid #e0e0e0;
+        box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.05);
+    }
+
+    .footer-content {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+
+    .footer-links {
+        display: flex;
+        gap: 20px;
+    }
+
+    .footer a {
+        color: #666666;
+        text-decoration: none;
+        transition: color 0.3s ease;
+    }
+
+    .footer a:hover {
+        color: #333333;
+    }
+
+    .footer-copyright {
+        color: #666666;
+    }
+    
+    /* Styles for the main content area, adapted for PRs using .issue-* class names */
+    .issue-container { max-width: 1200px; margin: 0 auto; padding: 2rem; }
+    .issue-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; background-color: #fff; padding: 1rem; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    .issue-title { font-size: 1.5rem; color: #24292e; }
+    .issue-title a { color: #586069; text-decoration: none; }
+    .issue-title a:hover { color: #0366d6; text-decoration: underline; }
+    .header-actions { display: flex; gap: 10px; align-items: center; }
+    .btn { padding: 8px 16px; border: none; border-radius: 4px; text-decoration: none; font-size: 14px; cursor: pointer; transition: background-color 0.3s ease; display: inline-flex; align-items: center; gap: 6px; }
+    .btn-primary { background-color: #0366d6; color: white; }
+    .btn-primary:hover { background-color: #0256cc; color: white; text-decoration: none; }
+    .btn-secondary { background-color: #6c757d; color: white; }
+    .btn-secondary:hover { background-color: #5a6268; }
+    .btn:disabled { background-color: #cccccc; cursor: not-allowed; }
+    .issue-main-title { background-color: #fff; padding: 1.5rem; margin-bottom: 1rem; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+    .issue-main-title h2 { font-size: 1.8rem; color: #24292e; margin-bottom: 0.5rem; font-weight: 600; }
+    .issue-meta-header { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; font-size: 0.9rem; }
+    .issue-status { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.4rem 1rem; border-radius: 2rem; font-weight: 500; }
+    .issue-status.open { background-color: #2ea44f20; color: #2ea44f; }
+    .issue-status.closed { background-color: #d73a4920; color: #d73a49; }
+    .issue-status.merged { background-color: #6f42c120; color: #6f42c1; } 
+    .issue-status i { font-size: 1rem; }
+    .issue-labels { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .issue-label { padding: 0.25rem 0.75rem; border-radius: 12px; font-size: 0.8rem; font-weight: 500; /* Color/BG set by JS */ }
+    
+    .ci-failure-banner { background-color: #fffbdd; border: 1px solid #ffeeba; color: #533f03; padding: 0.75rem 1rem; margin-bottom: 1rem; border-radius: 6px; font-size: 0.9rem; }
+    .ci-failure-banner h4 { margin-top: 0; margin-bottom: 0.5rem; color: #533f03; font-size: 1rem; }
+    
+    .issue-tabs { display: flex; gap: 1rem; margin-top: 2rem; border-bottom: 1px solid #e1e4e8; padding: 0 1rem; background-color: #fff; border-radius: 6px 6px 0 0; }
+    .tab-button { padding: 1rem; border: none; background: none; color: #586069; font-size: 1rem; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.2s ease; }
+    .tab-button:hover { color: #24292e; }
+    .tab-button.active { color: #1a73e8; border-bottom-color: #1a73e8; font-weight: 500; }
+    .tab-content { display: none; background-color: #fff; border-radius: 0 0 6px 6px; padding: 2rem; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+    .tab-content.active { display: block; }
+    
+    .pr-details-content-area {
+        background-color: #fff;
+        padding: 2rem;
+        border-radius: 6px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+        margin-bottom: 1rem;
+    }
+    .issue-meta { display: flex; align-items: center; gap: 1rem; color: #586069; font-size: 0.9rem; margin-bottom: 1rem; flex-wrap: wrap; padding: 0.5rem; background-color: #f6f8fa; border-radius: 4px; border: 1px solid #e1e4e8; }
+    .issue-meta code { background-color: #e1e4e8; padding: 0.1em 0.3em; border-radius: 3px; }
+    
+    .markdown-content { padding-top: 1rem; color: #24292e; line-height: 1.5; font-size: 1rem; }
+    .markdown-content h1, .markdown-content h2, .markdown-content h3, .markdown-content h4, .markdown-content h5, .markdown-content h6 { margin: 1.5rem 0 1rem; font-weight: 600; line-height: 1.25; }
+    .markdown-content p { margin-bottom: 1rem; }
+    .markdown-content ul, .markdown-content ol { margin-bottom: 1rem; padding-left: 2rem; }
+    .markdown-content li { margin: 0.25rem 0; }
+    .markdown-content code { padding: 0.2em 0.4em; margin: 0; font-size: 85%; background-color: #f0f0f0; border-radius: 3px; font-family: SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;}
+    .markdown-content pre { padding: 1rem; margin-bottom: 1rem; background-color: #f6f8fa; border-radius: 6px; overflow-x: auto; }
+    .markdown-content pre code { padding: 0; background-color: transparent; font-size: 0.9em; line-height: 1.45; }
+    .markdown-content blockquote { padding: 0 1em; color: #6a737d; border-left: 0.25em solid #dfe2e5; margin-bottom: 1rem; }
+    .markdown-content img { max-width: 100%; height: auto; margin: 1rem 0; }
+    .markdown-content table { border-spacing: 0; border-collapse: collapse; margin-bottom: 1rem; width: 100%; }
+    .markdown-content table th, .markdown-content table td { padding: 6px 13px; border: 1px solid #dfe2e5; }
+    .markdown-content table tr { background-color: #fff; border-top: 1px solid #c6cbd1; }
+    .markdown-content table tr:nth-child(2n) { background-color: #f6f8fa; }
+    
+    .comments-section { margin-top: 2rem; }
+    .comment { border: 1px solid #e1e4e8; border-radius: 6px; margin-bottom: 1rem; padding: 1rem; }
+    .comment-header { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
+    .comment-author { font-weight: 500; color: #24292e; }
+    .comment-time { color: #586069; font-size: 0.9rem; }
+    .comment-body { color: #24292e; line-height: 1.5; }
+
+    /* Terminal/Workspace styles from issue_details.html */
+    .terminal-container { background-color: #1e1e1e; border-radius: 6px; padding: 1rem; height: 500px; display: flex; flex-direction: column; }
+    .terminal-header { display: flex; align-items: center; padding-bottom: 1rem; border-bottom: 1px solid #333; margin-bottom: 1rem; }
+    .terminal-title { color: #fff; font-size: 0.9rem; flex-grow: 1; display: flex; justify-content: center; align-items: center; }
+    .terminal-controls { display: flex; gap: 0.5rem; }
+    .terminal-button { width: 12px; height: 12px; border-radius: 50%; border: none; cursor: pointer; }
+    .terminal-button.close { background-color: #ff5f56; }
+    .terminal-button.minimize { background-color: #ffbd2e; }
+    .terminal-button.maximize { background-color: #27c93f; }
+    .terminal-input-container, .terminal-prompt, .terminal-input { display: none; }
+    .terminal-content { flex: 1; overflow-y: auto; font-family: 'Menlo', 'Monaco', 'Courier New', monospace; font-size: 0.9rem; line-height: 1.5; color: #fff; padding-right: 1rem; padding-bottom: 1rem; }
+    .log-entry { margin-bottom: 0.5rem; display: flex; align-items: flex-start; }
+    .log-timestamp { color: #888; margin-right: 1rem; flex-shrink: 0; min-width: 140px; }
+    .log-message { flex: 1; white-space: pre-wrap; word-break: break-word; }
+    .log-message.info { color: #7cafc2; }
+    .log-message.success { color: #a1b56c; }
+    .log-message.error { color: #ab4642; }
+    .log-message.warning { color: #f7ca88; }
+    .log-message.separator { color: #d7875f; font-weight: bold; }
+    .log-message.section-header { color: #ffcc00; font-weight: bold; text-align: center; }
+    .status-indicator { display: flex; align-items: center; gap: 0.5rem; margin-left: 10px; font-size: 22px; }
+    .success-indicator { color: #28a745; font-weight: bold; }
+    .error-indicator { color: #dc3545; font-weight: bold; }
+    .spinner { display: inline-block; animation: spin 1s linear infinite; color: #1a73e8; font-weight: bold; }
+    .hidden { display: none; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="dashboard-container">
+    <div class="sidebar">
+        <div class="user-profile">
+            <img src="{{ user.avatar_url }}" alt="Profile" class="avatar">
+            <h3>{{ user.name or user.login }}</h3>
+            <p>@{{ user.login }}</p>
+        </div>
+        <nav class="sidebar-nav">
+            <a href="{{ url_for('dashboard') }}" class="nav-link">
+                <i class="fas fa-book"></i> Repositories
+            </a>
+            <a href="{{ url_for('review_pr') }}" class="nav-link">
+                <i class="fas fa-tasks"></i> Review PR
+            </a>
+            <a href="{{ url_for('settings') }}" class="nav-link">
+                <i class="fas fa-cog"></i> Settings
+            </a>
+            <a href="#" class="nav-link logout" onclick="event.preventDefault(); document.getElementById('logout-form').submit();">
+                <i class="fas fa-sign-out-alt"></i> Logout
+            </a>
+        </nav>
+        <form id="logout-form" action="{{ url_for('logout') }}" method="POST" style="display: none;"></form>
+    </div>
+
+    <div class="main-content">
+        <div class="content-wrapper"> 
+            <div class="issue-container"> 
+                <div class="issue-header"> 
+                    <h1 class="issue-title"> 
+                        <a href="{{ url_for('repository_issues', repo_name=repository.name) }}">{{ repository.name }}</a>
+                        {# Use pr_data.pr_number if available (from CiPrAnalysis), fallback to pr_data.number (from live fetch) #}
+                        / PR #{{ pr_data.pr_number | default(pr_data.number, true) }} (CI Failed)
+                    </h1>
+                    <div class="header-actions">
+                        <a href="{{ pr_data.pr_html_url | default(pr_data.html_url, true) }}" target="_blank" class="btn btn-primary">View on GitHub <i class="fab fa-github"></i></a>
+                    </div>
+                </div>
+
+                <div class="issue-main-title"> 
+                    <h2>{{ pr_data.pr_title | default(pr_data.title, true) }}</h2>
+                    <div class="issue-meta-header"> 
+                        <span class="issue-status {% if pr_data.state == 'open' %}open{% elif pr_data.merged %}merged{% else %}closed{% endif %}">
+                            <i class="fas {% if pr_data.state == 'open' %}fa-exclamation-circle{% elif pr_data.merged %}fa-check-circle{% else %}fa-times-circle{% endif %}"></i>
+                            {{ pr_data.state|capitalize }}{% if pr_data.merged %} (Merged){% endif %}
+                        </span>
+                        {% if pr_data.labels %}
+                        <div class="issue-labels"> 
+                            {% for label in pr_data.labels %}
+                            <span class="issue-label" data-color="{{ label.color | default('ededed', true) }}">
+                                {{ label.name }}
+                            </span>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+                
+                {% if pr_data.ci_failure_details_list %}
+                <div class="ci-failure-banner">
+                    <h4><i class="fas fa-exclamation-triangle"></i> CI Failure Details:</h4>
+                    <ul>
+                        {% for detail in pr_data.ci_failure_details_list %}
+                            <li>{{ detail }}</li>
+                        {% endfor %}
+                        {% if pr_data.ci_target_url %}
+                            <li><a href="{{ pr_data.ci_target_url }}" target="_blank">View CI Job</a></li>
+                        {% endif %}
+                    </ul>
+                </div>
+                {% endif %}
+
+                <div class="pr-details-content-area">
+                    <div class="issue-meta">
+                        <span><i class="fas fa-user"></i> Opened by {{ pr_data.user.login }}</span>
+                        <span><i class="fas fa-clock"></i> {{ pr_data.created_at|datetime }}</span>
+                        <span><i class="fas fa-code-branch"></i> From <code>{{ pr_data.head.ref }}</code> to <code>{{ pr_data.base.ref }}</code></span>
+                    </div>
+                    
+
+                <div class="issue-tabs"> 
+                    <button class="tab-button" data-tab="workspace" onclick="try { directTabSwitch('workspace'); } catch(e) { document.getElementById('workspace').style.display='block'; }; return false;">
+                        <i class="fas fa-code"></i> Workspace
+                    </button>
+                    <button class="tab-button" data-tab="summary" onclick="try { directTabSwitch('summary'); } catch(e) { document.getElementById('summary').style.display='block'; }; return false;">
+                        <i class="fas fa-chart-bar"></i> Summary
+                    </button>
+                </div>
+
+                <div id="workspace" class="tab-content active">
+                    <h2>Workspace</h2>
+                     <div class="terminal-container">
+                        <div class="terminal-header">
+                            <div class="terminal-controls">
+                                <button class="terminal-button close"></button>
+                                <button class="terminal-button minimize"></button>
+                                <button class="terminal-button maximize"></button>
+                            </div>
+                            <div class="terminal-title">
+                                CI PR Analysis Logs 
+                                <span class="status-indicator">
+                                    <span class="spinner {{ 'hidden' if pr_data.analysis_status != 'in_progress' and pr_data.analysis_status != 'pending' }}">⟳</span>
+                                     <span class="success-indicator {{ 'hidden' if pr_data.analysis_status != 'completed' and pr_data.ci_status != 'fixed' and pr_data.ci_status != 'resolved_by_user' }}">✓</span>
+                                    <span class="error-indicator {{ 'hidden' if pr_data.analysis_status != 'failed' and pr_data.ci_status != 'failed' and pr_data.ci_status != 'error'}}">✗</span>
+                                </span>
+                            </div>
+                        </div>
+                        <div class="terminal-content" id="prTerminalContent">
+                            {% if not pr_data.analysis_logs and pr_data.ci_status in ['failed', 'error'] %}
+                                <div class="log-entry">
+                                    <span class="log-timestamp">{{ pr_data.updated_at|datetime }}</span>
+                                    <span class="log-message info">CI failure detected. Analysis not yet started.</span>
+                                </div>
+                            {% elif not pr_data.analysis_logs %}
+                                <div class="log-entry">
+                                    <span class="log-timestamp">{{ pr_data.created_at|datetime }}</span>
+                                    <span class="log-message info">No analysis logs available for this PR.</span>
+                                </div>
+                            {% endif %}
+                            {% for log_entry in pr_data.analysis_logs %}
+                                <div class="log-entry">
+                                    <span class="log-timestamp">{{ log_entry.timestamp|datetime }}</span>
+                                    <span class="log-message {{ log_entry.type }}">{{ log_entry.message }}</span>
+                                </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+                <div id="summary" class="tab-content">
+                    <h2>Summary</h2>
+                    <p>The summary view is not yet implemented for CI-Fix PRs.</p>
+                    {% if pr_data.fix_pr_url %}
+                        <p>A fix was attempted: <a href="{{ pr_data.fix_pr_url }}" target="_blank">View Fix PR</a></p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        <footer class="footer">
+            <div class="footer-content">
+                <div class="footer-copyright">
+                    &copy; 2024 RepoPilot. All rights reserved.
+                </div>
+                <div class="footer-links">
+                    <a href="#">Privacy Policy</a>
+                    <a href="#">Terms of Service</a>
+                    <a href="#">Contact</a>
+                </div>
+            </div>
+        </footer>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+    {{ super() }} 
+    <script src="{{ url_for('static', filename='js/tab-switcher.js') }}"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script>
+        marked.setOptions({
+            highlight: function(code, lang) { return code; },
+            breaks: true,
+            gfm: true
+        });
+        
+        function applyLabelStyles() {
+            document.querySelectorAll('.issue-label[data-color]').forEach(label => {
+                const color = label.dataset.color || 'ededed';
+                label.style.backgroundColor = `#${color}`;
+                const r = parseInt(color.substring(0,2), 16);
+                const g = parseInt(color.substring(2,4), 16);
+                const b = parseInt(color.substring(4,6), 16);
+                const brightness = (r * 299 + g * 587 + b * 114) / 1000;
+                const textColor = brightness > 128 ? '#000000' : '#FFFFFF';
+                label.style.color = textColor;
+            });
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            applyLabelStyles(); 
+
+            const tabButtons = document.querySelectorAll('.tab-button[data-tab]');
+            const tabContents = document.querySelectorAll('.tab-content[id]');
+            function switchTab(targetTabId) {
+                tabContents.forEach(content => {
+                    content.style.display = content.id === targetTabId ? 'block' : 'none';
+                    content.classList.toggle('active', content.id === targetTabId);
+                });
+                tabButtons.forEach(button => {
+                    button.classList.toggle('active', button.dataset.tab === targetTabId);
+                });
+            }
+            tabButtons.forEach(button => {
+                button.addEventListener('click', function(event) {
+                    event.preventDefault();
+                    switchTab(this.dataset.tab);
+                });
+            });
+            const urlParams = new URLSearchParams(window.location.search);
+            let tabToOpen = urlParams.get('tab_to_open');
+            
+            if (!tabToOpen || tabToOpen === 'pr-details') {
+                if (document.querySelector('.tab-button[data-tab="workspace"]')) {
+                    tabToOpen = 'workspace';
+                }
+            } 
+            if (!tabToOpen && tabButtons.length > 0){
+                tabToOpen = tabButtons[0].dataset.tab;
+            }
+
+            if (tabToOpen) {
+                switchTab(tabToOpen);
+            }
+        });
+    </script>
+{% endblock %} 
