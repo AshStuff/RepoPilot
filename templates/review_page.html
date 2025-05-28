@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+
+{% block title %}Pull Requests for Review{% endblock %}
+
+{% block styles %}
+<style>
+    .review-container {
+        padding: 20px;
+    }
+    .pr-list {
+        list-style-type: none;
+        padding: 0;
+    }
+    .pr-item {
+        background-color: #fff;
+        border: 1px solid #e1e4e8;
+        border-radius: 6px;
+        padding: 15px 20px;
+        margin-bottom: 15px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.07);
+    }
+    .pr-item h3 {
+        margin-top: 0;
+        margin-bottom: 8px;
+        font-size: 1.2em;
+    }
+    .pr-item h3 a {
+        text-decoration: none;
+        color: #0366d6;
+    }
+    .pr-item h3 a:hover {
+        text-decoration: underline;
+    }
+    .pr-repo-name {
+        font-size: 0.9em;
+        color: #586069;
+        margin-bottom: 5px;
+    }
+    .pr-issue-link {
+        font-size: 0.9em;
+        color: #586069;
+        margin-bottom: 10px;
+    }
+    .pr-issue-link a {
+        color: #0366d6;
+    }
+    .pr-description {
+        font-size: 0.95em;
+        color: #24292e;
+        margin-bottom: 10px;
+        max-height: 60px; /* Limit height and add overflow */
+        overflow: hidden;
+        text-overflow: ellipsis;
+        display: -webkit-box;
+        -webkit-line-clamp: 3; /* Show 3 lines */
+        -webkit-box-orient: vertical;
+    }
+    .pr-link-button {
+        display: inline-block;
+        background-color: #2ea44f;
+        color: white;
+        padding: 8px 15px;
+        border-radius: 5px;
+        text-decoration: none;
+        font-size: 0.9em;
+        font-weight: 500;
+        transition: background-color 0.2s ease;
+    }
+    .pr-link-button:hover {
+        background-color: #22863a;
+    }
+    .no-prs {
+        text-align: center;
+        color: #586069;
+        padding: 40px;
+        font-size: 1.1em;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="dashboard-container">
+    <!-- Sidebar (assuming base.html has the sidebar block) -->
+    {% include 'includes/sidebar.html' %}
+
+    <!-- Main Content -->
+    <div class="main-content">
+        <div class="content-wrapper">
+            <div class="review-container">
+                <div class="issue-header" style="margin-bottom: 1.5rem;">
+                    <h1 class="issue-title">Pull Requests Ready for Review</h1>
+                </div>
+
+                {% if analyses_with_prs and analyses_with_prs.count() > 0 %}
+                    <ul class="pr-list">
+                        {% for analysis in analyses_with_prs %}
+                            <li class="pr-item">
+                                <div class="pr-repo-name">
+                                    <i class="fas fa-book"></i> {{ analysis.repository.name }}
+                                </div>
+                                <h3>
+                                    <a href="{{ url_for('issue_details', repo_name=analysis.repository.name, issue_number=analysis.issue_number) }}">
+                                        Issue #{{ analysis.issue_number }}: {{ analysis.issue_title|truncate(80, True) }}
+                                    </a>
+                                </h3>
+                                <div class="pr-issue-link">
+                                    Original Issue: <a href="https://github.com/{{ analysis.repository.name }}/issues/{{ analysis.issue_number }}" target="_blank">#{{ analysis.issue_number }} on GitHub</a>
+                                </div>
+                                {% if analysis.final_output %}
+                                    <div class="pr-description markdown-content">
+                                        {{ analysis.final_output|markdown|safe }}
+                                    </div>
+                                {% endif %}
+                                <a href="{{ analysis.pr_url }}" target="_blank" class="pr-link-button">
+                                    <i class="fab fa-github"></i> View Pull Request
+                                </a>
+                            </li>
+                        {% endfor %}
+                    </ul>
+                {% else %}
+                    <div class="no-prs">
+                        <p><i class="fas fa-check-circle" style="font-size: 2em; color: #2ea44f; margin-bottom:10px;"></i></p>
+                        <p>No pull requests are currently awaiting review.</p>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+        {% include 'includes/footer.html' %}
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<!-- Add any page-specific scripts here if needed -->
+{% endblock %} 

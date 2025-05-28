@@ -5,6 +5,7 @@ import json
 import logging
 import re # Ensure re is imported
 import time # Add time import
+import subprocess # Add subprocess import for docker commands
 
 try:
     import git
@@ -170,6 +171,130 @@ def get_all_codebase_files(repo_base_path):
     logger.info(f"Found {len(all_files)} files in codebase at {repo_base_path} (excluding .git, hidden files, and __pycache__)")
     return all_files
 
+def cleanup_container():
+    """Attempts to kill the current Docker container after analysis completion.
+    
+    REQUIREMENTS FOR THIS FUNCTIONALITY TO WORK:
+    
+    1. Docker Socket Access: The container needs access to the Docker daemon.
+       Mount the Docker socket when running the container:
+       docker run -v /var/run/docker.sock:/var/run/docker.sock ...
+    
+    2. Docker CLI: The container needs the Docker CLI installed.
+       Add to Dockerfile: RUN apt-get update && apt-get install -y docker.io
+    
+    3. Permissions: The container process needs permission to access Docker.
+       Either run as root or add user to docker group.
+    
+    4. Alternative Setup (Host-based cleanup):
+       If self-cleanup is not desired, the host system should monitor
+       the container and clean it up when analysis_output.json is written.
+    
+    DETECTION METHODS:
+    - Tries to get container ID from hostname (most reliable)
+    - Falls back to parsing /proc/self/cgroup
+    - Uses HOSTNAME environment variable as last resort
+    
+    CLEANUP METHODS (in order of preference):
+    - docker kill <container_id>
+    - docker stop <container_id>  
+    - os._exit(0) to force container process termination
+    
+    Returns:
+        bool: True if cleanup was successful, False otherwise
+    """
+    logger.info("Starting container cleanup process...")
+    
+    try:
+        # Get the current container ID from /proc/self/cgroup or hostname
+        container_id = None
+        
+        # Method 1: Try to get container ID from hostname (works in most Docker setups)
+        try:
+            container_id = os.uname().nodename
+            if len(container_id) == 12 or len(container_id) == 64:  # Docker container ID length
+                logger.info(f"Container ID detected from hostname: {container_id}")
+            else:
+                container_id = None
+        except:
+            pass
+            
+        # Method 2: Try to get container ID from /proc/self/cgroup
+        if not container_id:
+            try:
+                with open('/proc/self/cgroup', 'r') as f:
+                    cgroup_content = f.read()
+                # Look for docker container ID in cgroup
+                for line in cgroup_content.splitlines():
+                    if 'docker' in line and '/' in line:
+                        parts = line.split('/')
+                        if len(parts) > 1:
+                            potential_id = parts[-1]
+                            if len(potential_id) >= 12:
+                                container_id = potential_id[:12]  # Use first 12 chars
+                                logger.info(f"Container ID detected from cgroup: {container_id}")
+                                break
+            except Exception as e:
+                logger.warning(f"Could not read /proc/self/cgroup: {e}")
+        
+        # Method 3: Try environment variable if set by docker run
+        if not container_id:
+            container_id = os.environ.get('HOSTNAME')
+            if container_id:
+                logger.info(f"Container ID from HOSTNAME env var: {container_id}")
+        
+        if not container_id:
+            logger.error("Could not determine container ID for cleanup")
+            return False
+            
+        # Attempt to kill the container using docker CLI
+        logger.info(f"Attempting to kill container {container_id}...")
+        
+        # Give a small delay to ensure any file operations are flushed
+        time.sleep(2)
+        
+        # Try to kill the container
+        try:
+            # First try docker kill
+            result = subprocess.run(['docker', 'kill', container_id], 
+                                  capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                logger.info(f"Successfully killed container {container_id}")
+                return True
+            else:
+                logger.warning(f"Docker kill failed: {result.stderr}")
+        except subprocess.TimeoutExpired:
+            logger.error("Docker kill command timed out")
+        except FileNotFoundError:
+            logger.warning("Docker CLI not found in container")
+        except Exception as e:
+            logger.error(f"Error running docker kill: {e}")
+            
+        # Alternative: Try to stop the container
+        try:
+            result = subprocess.run(['docker', 'stop', container_id], 
+                                  capture_output=True, text=True, timeout=30)
+            if result.returncode == 0:
+                logger.info(f"Successfully stopped container {container_id}")
+                return True
+            else:
+                logger.warning(f"Docker stop failed: {result.stderr}")
+        except Exception as e:
+            logger.error(f"Error running docker stop: {e}")
+            
+        # If docker commands fail, try alternative cleanup methods
+        logger.warning("Docker commands failed, attempting alternative cleanup...")
+        
+        # Try to exit the container process forcefully
+        logger.info("Attempting to exit container process...")
+        os._exit(0)  # Force exit the container process
+        
+    except Exception as e:
+        logger.error(f"Container cleanup failed: {e}")
+        return False
+    
+    return False
+
 def main():
     logger.info("container_agent.py: main() started.")
     # The logger below was redundant as main() already logs its start.
@@ -198,6 +323,9 @@ def main():
         with open(analysis_output_path, 'w') as f_out:
             json.dump(final_output, f_out, indent=4)
         logger.error(f"container_agent.py: Critical error - issue file not found. Outputting error to {analysis_output_path} and exiting.")
+        # Cleanup container even on error
+        logger.info("Initiating container cleanup after error...")
+        cleanup_container()
         return
 
     repo_path = _get_repo_path()
@@ -209,6 +337,9 @@ def main():
         with open(analysis_output_path, 'w') as f_out:
             json.dump(final_output, f_out, indent=4)
         logger.error(f"container_agent.py: Critical error - repo path not found. Outputting error to {analysis_output_path} and exiting.")
+        # Cleanup container even on error
+        logger.info("Initiating container cleanup after error...")
+        cleanup_container()
         return
 
     logger.info(f"Repository path determined as: {repo_path}")
@@ -239,6 +370,9 @@ def main():
         with open(analysis_output_path, 'w') as f_out:
             json.dump(final_output, f_out, indent=4)
         logger.error(f"container_agent.py: Critical error - Aider not available. Error report written to {analysis_output_path} and exiting.")
+        # Cleanup container even on error
+        logger.info("Initiating container cleanup after error...")
+        cleanup_container()
         return # Exit main()
 
     coder = None
@@ -285,6 +419,9 @@ def main():
         with open(analysis_output_path, 'w') as f_out:
             json.dump(final_output, f_out, indent=4)
         logger.error(f"container_agent.py: Critical error - Aider init failed. Outputting error to {analysis_output_path} and exiting.")
+        # Cleanup container even on error
+        logger.info("Initiating container cleanup after error...")
+        cleanup_container()
         return
 
     # Construct the prompt for the LLM
@@ -534,6 +671,17 @@ After applying the fix, please briefly explain the changes you made and why. The
     print(f"Analysis complete. Output written to {analysis_output_path}", file=original_stdout)
     original_stdout.flush()
     logger.info("container_agent.py: main() finished.")
+    
+    # Container cleanup - kill the Docker container after analysis completion
+    logger.info("Analysis completed successfully. Initiating container cleanup...")
+    cleanup_success = cleanup_container()
+    
+    if not cleanup_success:
+        logger.warning("Container cleanup failed or not possible. Container may need manual cleanup.")
+        # Still exit normally so the container can be cleaned up by the host
+        sys.exit(0)
+    else:
+        logger.info("Container cleanup initiated successfully.")
 
 if __name__ == '__main__':
     logger.info("container_agent.py: Script __main__ started.")
@@ -556,4 +704,12 @@ if __name__ == '__main__':
             logger.info(f"container_agent.py: Minimal error JSON written to {error_output_path}")
         except Exception as e_final_write:
             logger.error(f"container_agent.py: Could not even write minimal error JSON: {str(e_final_write)}")
+        
+        # Cleanup container even on critical error
+        logger.info("Initiating container cleanup after critical error...")
+        try:
+            cleanup_container()
+        except Exception as e_cleanup:
+            logger.error(f"Container cleanup also failed: {e_cleanup}")
+        
         sys.exit(1) # Exit with error code 

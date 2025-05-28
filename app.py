@@ -1474,21 +1474,50 @@ def issue_details(repo_name, issue_number):
 
     try:
         user = User.objects(id=session['user']['id']).first()
-        repository = ConnectedRepository.objects(user=user, name=repo_name).first()
+        if not user:
+            session.clear()
+            return redirect(url_for('login'))
+
+        # First, verify repository access through GitHub API
+        access_token = session['user']['access_token']
+        repo_resp = github_api_call(f'repos/{repo_name}', access_token)
         
-        if not repository:
-            flash('Repository not found or not connected to your account.', 'error')
+        if not repo_resp or repo_resp.status_code != 200:
+            flash('Repository not found or no access', 'error')
             return redirect(url_for('dashboard'))
         
+        repo_data = repo_resp.json()
+        
+        # Try to find connected repository
+        repository = ConnectedRepository.objects(user=user, name=repo_name).first()
+        
+        # If repository is not connected, create a temporary one for analysis purposes
+        if not repository:
+            logger.info(f"Repository {repo_name} not connected for user {user.login}, but accessible. Creating temporary repository record.")
+            try:
+                repository = ConnectedRepository(
+                    user=user,
+                    github_repo_id=str(repo_data['id']),
+                    name=repo_name,
+                    description=repo_data.get('description', ''),
+                    is_private=repo_data['private']
+                )
+                repository.save()
+                logger.info(f"Created repository record for {repo_name}")
+            except Exception as e:
+                logger.error(f"Failed to create repository record for {repo_name}: {str(e)}")
+                flash('Error accessing repository.', 'error')
+                return redirect(url_for('repository_issues', repo_name=repo_name))
+        
         # Get issue data from GitHub
-        issue_data, comments_data = get_issue_data(repo_name, issue_number, session['user']['access_token'])
+        issue_data, comments_data = get_issue_data(repo_name, issue_number, access_token)
         
         if not issue_data:
             flash('Issue not found.', 'error')
             return redirect(url_for('repository_issues', repo_name=repo_name))
         
         # Get comments using PyGithub for more detailed info
-        github_client = Github(session['user']['access_token'])
+        github_client = Github(access_token)
         repo = github_client.get_repo(repo_name)
         issue = repo.get_issue(issue_number)
         comments = list(issue.get_comments())
@@ -1564,7 +1593,7 @@ def issue_details(repo_name, issue_number):
             logger.info(f"Issue Details: Triggering analysis for issue #{issue_number} (ID: {analysis.id}, Status: {analysis.analysis_status}).")
             asyncio.run(trigger_issue_analysis(repository, 
                                              issue_data, 
-                                             access_token=session['user']['access_token'], 
+                                             access_token=access_token, 
                                              initial_analysis_object=analysis))
         
         current_logs = analysis.logs if analysis and hasattr(analysis, 'logs') else []
@@ -1708,10 +1737,36 @@ def analysis_status(repo_name, issue_number):
         
     try:
         user = User.objects(id=session['user']['id']).first()
+        if not user:
+            return jsonify({'error': 'User not found'}), 401
+
+        # First, verify repository access through GitHub API
+        access_token = session['user']['access_token']
+        repo_resp = github_api_call(f'repos/{repo_name}', access_token)
+        
+        if not repo_resp or repo_resp.status_code != 200:
+            return jsonify({'error': 'Repository not found or no access'}), 404
+        
+        repo_data = repo_resp.json()
+        
+        # Try to find connected repository
         repository = ConnectedRepository.objects(user=user, name=repo_name).first()
         
+        # If repository is not connected, create one for analysis purposes
         if not repository:
-            return jsonify({'error': 'Repository not found'}), 404
+            try:
+                repository = ConnectedRepository(
+                    user=user,
+                    github_repo_id=str(repo_data['id']),
+                    name=repo_name,
+                    description=repo_data.get('description', ''),
+                    is_private=repo_data['private']
+                )
+                repository.save()
+                logger.info(f"Created repository record for {repo_name} in analysis_status API")
+            except Exception as e:
+                logger.error(f"Failed to create repository record for {repo_name}: {str(e)}")
+                return jsonify({'error': 'Error accessing repository'}), 500
             
         # Get analysis for this issue
         analysis = IssueAnalysis.objects(repository=repository, issue_number=issue_number).first()
@@ -1740,15 +1795,39 @@ def analyze_issue_api(repo_name, issue_number):
         if not user:
             return jsonify({'error': 'User not found'}), 404
 
+        # First, verify repository access through GitHub API
+        access_token = session['user']['access_token']
+        repo_resp = github_api_call(f'repos/{repo_name}', access_token)
+        
+        if not repo_resp or repo_resp.status_code != 200:
+            return jsonify({'error': 'Repository not found or no access'}), 404
+        
+        repo_data = repo_resp.json()
+        
+        # Try to find connected repository
         repository = ConnectedRepository.objects(user=user, name=repo_name).first()
+        
+        # If repository is not connected, create one for analysis purposes
         if not repository:
-            return jsonify({'error': 'Repository not found or not connected'}), 404
+            try:
+                repository = ConnectedRepository(
+                    user=user,
+                    github_repo_id=str(repo_data['id']),
+                    name=repo_name,
+                    description=repo_data.get('description', ''),
+                    is_private=repo_data['private']
+                )
+                repository.save()
+                logger.info(f"Created repository record for {repo_name} in analyze_issue_api")
+            except Exception as e:
+                logger.error(f"Failed to create repository record for {repo_name}: {str(e)}")
+                return jsonify({'error': 'Error accessing repository'}), 500
 
         # Fetch issue data from GitHub to pass to trigger_issue_analysis
         # This is similar to what issue_details route does
         # Ensure you have PyGithub imported if not already: from github import Github
         try:
-            github_client = Github(session['user']['access_token'])
+            github_client = Github(access_token)
             gh_repo = github_client.get_repo(repo_name)
             gh_issue = gh_repo.get_issue(issue_number)
         except Exception as gh_e:
@@ -1821,7 +1900,7 @@ def analyze_issue_api(repo_name, issue_number):
             asyncio.run(trigger_issue_analysis(
                 repository=repository,
                 issue_data=issue_data_dict, 
-                access_token=session['user']['access_token'],
+                access_token=access_token,
                 initial_analysis_object=analysis_object_to_pass
             ))
             return jsonify({'status': 'success', 'message': f'Analysis triggered for issue #{issue_number}'}), 200

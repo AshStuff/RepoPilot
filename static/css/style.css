@@ -133,22 +133,6 @@ body {
     color: #ffffff;
 }
 
-.login-button.gitlab {
-    background-color: #fc6d26;
-}
-
-.login-button.gitlab:hover {
-    background-color: #e24329;
-}
-
-.login-button.bitbucket {
-    background-color: #0052cc;
-}
-
-.login-button.bitbucket:hover {
-    background-color: #0747a6;
-}
-
 /* Flash Messages */
 .flash-messages {
     margin-bottom: 1.5rem;
