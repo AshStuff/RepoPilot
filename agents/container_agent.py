@@ -393,7 +393,7 @@ def main():
         
         # Configure the model for Aider, using the ollama model string like in test_aider.py
         # Original script used 'ollama-qwen2.5-coder:32b', test_aider.py 'ollama/qwen2.5-coder:32b'
-        main_model = Model("ollama/qwen2.5-coder:32b")
+        main_model = Model("ollama/qwen2.5-coder:7b")
 
         coder = Coder.create(
             main_model=main_model,
