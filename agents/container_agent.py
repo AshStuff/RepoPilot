@@ -441,7 +441,7 @@ The user has reported the following issue:
 
 Please analyze the issue and the codebase.
 Then, modify the code to fix the bug described in the issue.
-After applying the fix, please briefly explain the changes you made and why. The explanation should be under the **Explanation** section. 
+After applying the fix, please briefly explain the changes you made and why. The explanation should be under the **Explanation** section.
 """
 
     logger.info(f"Prompting Aider LLM. Issue content length: {len(issue_content)}, Codebase files in prompt context: {len(files_for_prompt)}")

@@ -392,10 +392,6 @@
                         Resolved Issues
                         <span class="issue-count resolved-count">0</span>
                     </button>
-                    <button class="tab-button" data-tab="unresolved">
-                        Unresolved Issues
-                        <span class="issue-count unresolved-count">0</span>
-                    </button>
                 </div>
 
                 <!-- Tab Contents -->
@@ -447,39 +443,6 @@
                                             </a>
                                             <div class="issue-meta">
                                                 #{{ issue.number }} closed {{ issue.closed_at|datetime }} by {{ issue.user.login }}
-                                            </div>
-                                            {% if issue.labels %}
-                                                <div class="issue-labels">
-                                                    {% for label in issue.labels %}
-                                                        <span class="issue-label" data-color="{{ label.color }}">
-                                                            {{ label.name }}
-                                                        </span>
-                                                    {% endfor %}
-                                                </div>
-                                            {% endif %}
-                                        </div>
-                                    </div>
-                                {% endif %}
-                            {% endfor %}
-                        {% endif %}
-                    </div>
-                </div>
-
-                <div id="unresolved" class="tab-content">
-                    <div class="issues-list">
-                        {% if issues %}
-                            {% for issue in issues %}
-                                {% if issue.state == 'open' and issue.labels|selectattr("name", "equalto", "bug")|list %}
-                                    <div class="issue-item">
-                                        <div class="issue-icon">
-                                            <i class="fas fa-bug"></i>
-                                        </div>
-                                        <div class="issue-content">
-                                            <a href="{{ url_for('issue_details', repo_name=repository.full_name, issue_number=issue.number) }}" class="issue-title">
-                                                {{ issue.title }}
-                                            </a>
-                                            <div class="issue-meta">
-                                                #{{ issue.number }} opened {{ issue.created_at|datetime }} by {{ issue.user.login }}
                                             </div>
                                             {% if issue.labels %}
                                                 <div class="issue-labels">
@@ -562,7 +525,6 @@
             // Clear existing issues
             document.querySelector('#ongoing .issues-list').innerHTML = '';
             document.querySelector('#resolved .issues-list').innerHTML = '';
-            document.querySelector('#unresolved .issues-list').innerHTML = '';
 
             // Add issues to their respective tabs
             issues.forEach(issue => {
@@ -572,13 +534,6 @@
                 } else if (!issue.closed_at) {
                     // Add to ongoing tab
                     addIssueToList(issue, 'ongoing', false);
-                    
-                    // Check if this is also a bug issue
-                    const isBugIssue = issue.labels && issue.labels.some(label => label.name === 'bug');
-                    if (isBugIssue) {
-                        // Add to unresolved tab
-                        addIssueToList(issue, 'unresolved', false, true);
-                    }
                 }
             });
 
@@ -594,12 +549,12 @@
         }
 
         // Helper function to add an issue to a specific tab
-        function addIssueToList(issue, tabId, isClosed, isBug = false) {
+        function addIssueToList(issue, tabId, isClosed) {
             const container = document.querySelector(`#${tabId} .issues-list`);
             const issueElement = document.createElement('div');
             issueElement.className = isClosed ? 'issue-item issue-closed' : 'issue-item';
             
-            const iconClass = isBug ? 'fa-bug' : (isClosed ? 'fa-check-circle' : 'fa-exclamation-circle');
+            const iconClass = isClosed ? 'fa-check-circle' : 'fa-exclamation-circle';
             const timeInfo = isClosed ? 
                 `closed ${formatDate(new Date(issue.closed_at))} by ${issue.user.login}` : 
                 `opened ${formatDate(new Date(issue.created_at))} by ${issue.user.login}`;
@@ -673,11 +628,9 @@
         function updateIssueCounts() {
             const ongoingIssues = document.querySelectorAll('#ongoing .issue-item').length;
             const resolvedIssues = document.querySelectorAll('#resolved .issue-item').length;
-            const unresolvedIssues = document.querySelectorAll('#unresolved .issue-item').length;
 
             document.querySelector('.ongoing-count').textContent = ongoingIssues;
             document.querySelector('.resolved-count').textContent = resolvedIssues;
-            document.querySelector('.unresolved-count').textContent = unresolvedIssues;
         }
 
         // Initial count update

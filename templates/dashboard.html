@@ -769,10 +769,6 @@
                 <a href="{{ url_for('review_pr') }}" class="nav-link">
                     <i class="fas fa-tasks"></i> Review PR
                 </a>
-                <a href="#" class="nav-link" data-tab="settings">
-                    <i class="fas fa-cog"></i>
-                    Settings
-                </a>
                 <a href="#" class="nav-link logout" onclick="event.preventDefault(); document.getElementById('logout-form').submit();">
                     <i class="fas fa-sign-out-alt"></i>
                     Logout
@@ -874,48 +870,6 @@
                         </div>
                     </div>
                 </div>
-
-                <div id="settings-tab" class="tab-content" style="display: none;">
-                    <div class="settings-container">
-                        <div class="settings-section">
-                            <h2>Profile Settings</h2>
-                            <div class="profile-picture-section">
-                                <img src="{{ user.avatar_url }}" alt="Profile Picture" class="profile-picture">
-                                <div class="upload-btn-wrapper">
-                                    <button class="btn">Upload New Picture</button>
-                                    <input type="file" name="profile_picture" accept="image/*" />
-                                </div>
-                            </div>
-                            <div class="form-group">
-                                <label for="display_name">Display Name</label>
-                                <input type="text" id="display_name" value="{{ user.name or user.login }}" placeholder="Enter your display name">
-                            </div>
-                            <div class="form-group">
-                                <label for="email">Email</label>
-                                <input type="text" id="email" value="{{ user.email }}" placeholder="Enter your email" readonly>
-                            </div>
-                        </div>
-
-                        <div class="settings-section">
-                            <h2>Access Token</h2>
-                            <p>Your GitHub access token for API access:</p>
-                            <div class="token-display">
-                                <div class="token-text token-hidden">{{ user.access_token if user.access_token else 'No token available' }}</div>
-                                <div class="token-placeholder">••••••••••••••••</div>
-                                <div class="token-actions">
-                                    <button class="token-btn" onclick="toggleToken()" title="Show/Hide Token">
-                                        <i class="fas fa-eye"></i>
-                                    </button>
-                                    <button class="token-btn" onclick="copyToken()" title="Copy Token">
-                                        <i class="fas fa-copy"></i>
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-
-                        <button class="btn-save" onclick="saveSettings()">Save Changes</button>
-                    </div>
-                </div>
             </div>
 
             <footer class="footer">
@@ -960,36 +914,6 @@
                 });
             });
         });
-
-        function toggleToken() {
-            const tokenText = document.querySelector('.token-text');
-            const tokenPlaceholder = document.querySelector('.token-placeholder');
-            const toggleBtn = document.querySelector('.token-btn i');
-            
-            if (tokenText.classList.contains('token-hidden')) {
-                tokenText.classList.remove('token-hidden');
-                tokenPlaceholder.style.display = 'none';
-                toggleBtn.classList.remove('fa-eye');
-                toggleBtn.classList.add('fa-eye-slash');
-            } else {
-                tokenText.classList.add('token-hidden');
-                tokenPlaceholder.style.display = 'block';
-                toggleBtn.classList.remove('fa-eye-slash');
-                toggleBtn.classList.add('fa-eye');
-            }
-        }
-
-        function copyToken() {
-            const tokenText = document.querySelector('.token-text').textContent;
-            navigator.clipboard.writeText(tokenText).then(() => {
-                alert('Token copied to clipboard!');
-            });
-        }
-
-        function saveSettings() {
-            // Handle saving settings
-            alert('Settings saved successfully!');
-        }
 
         function showConnectRepoModal() {
             document.getElementById('connectRepoModal').style.display = 'block';
